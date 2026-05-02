@@ -13,8 +13,8 @@ import {FeeMath} from "./FeeMath.sol";
 
 /// @title RevealReceiptStore
 /// @notice Seller-first managed receipt contract for zkReveal Receipt Mode.
-/// @dev Sellers create listings, buyers pay with seller-issued purchase references,
-/// and settlement completes immediately with an on-chain receipt record.
+/// @dev Sellers create listings with opaque metadata commitments, buyers pay with seller-issued
+/// purchase references, and settlement completes immediately with an on-chain receipt record.
 contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
@@ -26,8 +26,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     string public constant EIP712_VERSION = "1";
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 1_000;
     uint16 public constant MAX_INTEGRATOR_FEE_BPS = 1_000;
-    uint256 public constant MAX_TITLE_LENGTH = 96;
-    uint256 public constant MAX_RESOURCE_ID_LENGTH = 128;
     /// @dev v1 purchase amount caps assume a 6-decimal settlement token such as USDC.
     uint256 public constant MIN_PURCHASE_AMOUNT = 1e6;
     uint256 public constant MAX_PURCHASE_AMOUNT = 5_000e6;
@@ -35,7 +33,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     uint256 public constant MAX_LISTINGS_PER_SELLER = 50;
     uint256 public constant MAX_QUOTE_SIGNERS_PER_SELLER = 3;
     bytes32 public constant SIGNED_RECEIPT_QUOTE_TYPEHASH = keccak256(
-        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
+        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
     );
 
     // -------------------------------------------------------------------------
@@ -52,8 +50,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     struct Listing {
         address seller;
-        string title;
-        string resourceId;
+        bytes32 listingHash;
         uint256 unitPrice;
         bool active;
     }
@@ -73,16 +70,18 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @dev `seller` and `settlementToken` are derived by the contract but are still included in the
     ///      EIP-712 hash. The quote may be signed by the seller directly or by a seller-authorized
     ///      quote signer managed with `setQuoteSigner`. Authorized quote signers can sign dynamic
-    ///      quotes for any listing owned by that seller. `purchaseRef` is seller-scoped replay
-    ///      protection and `amount` is denominated in settlement token base units. Integrator fee
-    ///      fields are optional, must be explicitly included in the seller-authorized EIP-712 quote,
-    ///      and are paid from the gross `amount`; the seller receives `amount - protocolFee -
-    ///      integratorFeeAmount`.
+    ///      quotes for any listing owned by that seller. `purchaseRef` is an opaque seller-scoped
+    ///      replay protection reference, `metadataHash` binds seller-defined off-chain checkout or
+    ///      payment-link metadata, and `amount` is denominated in settlement token base units.
+    ///      Integrator fee fields are optional, must be explicitly included in the seller-authorized
+    ///      EIP-712 quote, and are paid from the gross `amount`; the seller receives `amount -
+    ///      protocolFee - integratorFeeAmount`.
     struct SignedReceiptQuote {
         uint256 listingId;
         address buyer;
         bytes32 purchaseRef;
         uint256 amount;
+        bytes32 metadataHash;
         address integratorFeeRecipient;
         uint256 integratorFeeAmount;
         uint64 expiresAt;
@@ -111,7 +110,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     mapping(address => uint256[]) public receiptsBySeller;
     mapping(address seller => mapping(address signer => bool)) public authorizedQuoteSigners;
     mapping(address seller => uint256 count) public authorizedQuoteSignerCount;
-    /// @dev Seller-issued `purchaseRef` values are generated off-chain and enforced as unique per seller.
+    /// @dev Seller-issued opaque `purchaseRef` values are generated off-chain and enforced as unique per seller.
     mapping(address => mapping(bytes32 => bool)) public purchaseRefUsed;
     /// @dev Deterministic seller-scoped reconciliation helper for off-chain generated refs. Returns 0 if unused.
     mapping(address => mapping(bytes32 => uint256)) public receiptIdBySellerAndPurchaseRef;
@@ -125,7 +124,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     event ListingCreated(
-        uint256 indexed listingId, address indexed seller, string title, string resourceId, uint256 unitPrice
+        uint256 indexed listingId, address indexed seller, bytes32 indexed listingHash, uint256 unitPrice
     );
 
     event ListingStatusChanged(uint256 indexed listingId, address indexed seller, bool active);
@@ -141,7 +140,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         uint256 listingId,
         address buyer,
         uint256 amount,
-        string resourceId
+        bytes32 metadataHash
     );
 
     event ProtocolFeePaid(
@@ -174,7 +173,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     error ListingCreationPaused();
     error PurchasesPaused();
     error QuoteSignerUpdatesPaused();
-    error TextTooLong();
     error AmountOutOfBounds();
     error QuoteExpiryTooLong();
     error SellerListingLimitReached();
@@ -223,15 +221,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     function _validatePurchaseAmount(uint256 amount) internal pure {
         if (amount < MIN_PURCHASE_AMOUNT || amount > MAX_PURCHASE_AMOUNT) {
             revert AmountOutOfBounds();
-        }
-    }
-
-    function _validateListingText(string calldata title, string calldata resourceId) internal pure {
-        uint256 titleLength = bytes(title).length;
-        uint256 resourceIdLength = bytes(resourceId).length;
-        if (titleLength == 0 || resourceIdLength == 0) revert InvalidParams();
-        if (titleLength > MAX_TITLE_LENGTH || resourceIdLength > MAX_RESOURCE_ID_LENGTH) {
-            revert TextTooLong();
         }
     }
 
@@ -309,6 +298,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
                     quote.buyer,
                     quote.purchaseRef,
                     quote.amount,
+                    quote.metadataHash,
                     address(settlementToken),
                     quote.integratorFeeRecipient,
                     quote.integratorFeeAmount,
@@ -340,6 +330,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         if (!listing.active) revert ListingInactive();
         if (quote.buyer != expectedBuyer) revert QuoteBuyerMismatch();
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
+        if (quote.metadataHash == bytes32(0)) revert InvalidParams();
         _validatePurchaseAmount(quote.amount);
         _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
         if (quote.expiresAt <= block.timestamp) revert QuoteExpired();
@@ -362,7 +353,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         address receiptBuyer,
         uint256 amount,
         bytes32 purchaseRef,
-        string memory resourceId,
+        bytes32 metadataHash,
         address integratorFeeRecipient,
         uint256 integratorFeeAmount
     ) internal returns (uint256 receiptId) {
@@ -389,7 +380,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
             receiptId, listingId, seller, amount, integratorFeeRecipient, integratorFeeAmount
         );
 
-        emit ReceiptPurchased(receiptId, seller, purchaseRef, listingId, receiptBuyer, amount, resourceId);
+        emit ReceiptPurchased(receiptId, seller, purchaseRef, listingId, receiptBuyer, amount, metadataHash);
     }
 
     // -------------------------------------------------------------------------
@@ -446,14 +437,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     /// @notice Create a seller-owned listing for Receipt Mode purchases.
-    /// @dev `unitPrice` is denominated in settlement token base units.
-    ///      `listingId` is the canonical on-chain identifier and `resourceId` is seller-defined semantic metadata.
-    function createListing(string calldata title, string calldata resourceId, uint256 unitPrice)
-        external
-        returns (uint256 listingId)
-    {
+    /// @dev `listingHash` is an opaque seller-defined metadata commitment. Human-readable product
+    ///      data lives off-chain, for example inside a seller-signed payment link. `unitPrice` is
+    ///      denominated in settlement token base units.
+    function createListing(bytes32 listingHash, uint256 unitPrice) external returns (uint256 listingId) {
         if (listingCreationPaused) revert ListingCreationPaused();
-        _validateListingText(title, resourceId);
+        if (listingHash == bytes32(0)) revert InvalidParams();
         _validatePurchaseAmount(unitPrice);
         if (listingsBySeller[msg.sender].length >= MAX_LISTINGS_PER_SELLER) {
             revert SellerListingLimitReached();
@@ -463,14 +452,13 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
         Listing storage listing = listings[listingId];
         listing.seller = msg.sender;
-        listing.title = title;
-        listing.resourceId = resourceId;
+        listing.listingHash = listingHash;
         listing.unitPrice = unitPrice;
         listing.active = true;
 
         listingsBySeller[msg.sender].push(listingId);
 
-        emit ListingCreated(listingId, msg.sender, title, resourceId, unitPrice);
+        emit ListingCreated(listingId, msg.sender, listingHash, unitPrice);
     }
 
     /// @notice Update the active status of a seller-owned listing.
@@ -499,8 +487,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     /// @notice Purchase a Receipt Mode listing using a seller-issued off-chain purchase reference.
-    /// @dev `purchaseRef` is a seller-issued off-chain purchase intent reference and must be unique per seller.
-    ///      Payment settles immediately and fulfillment remains entirely off-chain in seller systems.
+    /// @dev `purchaseRef` is expected to be a hash or other opaque seller-scoped purchase intent
+    ///      reference and must be unique per seller. Payment settles immediately and fulfillment
+    ///      remains entirely off-chain in seller systems.
     function purchaseReceipt(uint256 listingId, bytes32 purchaseRef)
         external
         nonReentrant
@@ -515,15 +504,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         if (purchaseRefUsed[listing.seller][purchaseRef]) revert PurchaseRefAlreadyUsed();
 
         return _settleReceiptPurchase(
-            listingId,
-            listing.seller,
-            msg.sender,
-            msg.sender,
-            listing.unitPrice,
-            purchaseRef,
-            listing.resourceId,
-            address(0),
-            0
+            listingId, listing.seller, msg.sender, msg.sender, listing.unitPrice, purchaseRef, bytes32(0), address(0), 0
         );
     }
 
@@ -548,7 +529,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
             msg.sender,
             quote.amount,
             quote.purchaseRef,
-            listing.resourceId,
+            quote.metadataHash,
             quote.integratorFeeRecipient,
             quote.integratorFeeAmount
         );
@@ -586,10 +567,11 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         return _hashSignedReceiptQuote(quote, listing.seller);
     }
 
-    /// @notice Preview gross amount, protocol fee, integrator fee, seller net, fee recipients, seller, and resourceId
-    ///         for a signed quote.
+    /// @notice Preview gross amount, protocol fee, integrator fee, seller net, fee recipients,
+    /// seller, and listingHash for a signed quote.
     /// @dev This performs fee math only. It does not verify the seller signature, buyer match, quote expiry,
-    ///      listing active status, or purchaseRef replay status.
+    ///      listing active status, or purchaseRef replay status. `listingHash` is an opaque
+    ///      seller-defined metadata commitment; human-readable product data remains off-chain.
     function previewSignedReceiptPurchase(SignedReceiptQuote calldata quote)
         external
         view
@@ -602,11 +584,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
             address quotedFeeRecipient,
             address integratorFeeRecipient,
             address seller,
-            string memory resourceId
+            bytes32 listingHash
         )
     {
         Listing storage listing = listings[quote.listingId];
         if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
+        if (quote.metadataHash == bytes32(0)) revert InvalidParams();
         RakeQuote memory rake = _quoteRake(quote.amount, quote.integratorFeeRecipient, quote.integratorFeeAmount);
 
         grossAmount = rake.grossAmount;
@@ -616,7 +599,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         quotedFeeRecipient = rake.protocolFeeRecipient;
         integratorFeeRecipient = rake.integratorFeeRecipient;
         seller = listing.seller;
-        resourceId = listing.resourceId;
+        listingHash = listing.listingHash;
     }
 
     // -------------------------------------------------------------------------

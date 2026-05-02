@@ -23,24 +23,27 @@ v1 is Receipt Mode only.
 
 ### Fixed-price receipt flow
 
-1. Create a fixed-price listing with `createListing(title, resourceId, unitPrice)`.
+1. Create a fixed-price listing with `createListing(listingHash, unitPrice)`.
 2. Optionally update the fixed listing price with `setListingPrice(listingId, newUnitPrice)`.
 3. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
-4. Generate a unique off-chain `purchaseRef` for the buyer or order.
+4. Generate a unique opaque off-chain `purchaseRef` for the buyer or order.
 5. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef)`.
 
 `purchaseReceipt` is the direct fixed-price purchase path. It does not support integrator fees.
 
+`listingHash` is an opaque seller-defined metadata commitment. Human-readable product data lives off-chain, for example inside a seller-signed payment link or checkout payload.
+
 ### Signed quote receipt flow
 
-1. Seller backend creates an order and generates a seller-scoped `purchaseRef`.
+1. Seller backend creates an order and generates a seller-scoped opaque `purchaseRef`.
 2. Seller optionally authorizes a backend or service key once with `setQuoteSigner(signer, true)`.
-3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` with `listingId`, `buyer`, `purchaseRef`, `amount`, `settlementToken`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` with `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, `settlementToken`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`.
 4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
 5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a seller-authorized quote signer at purchase time.
 6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
 
 Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery.
+`metadataHash` must be non-zero and should commit to the readable off-chain payment-link or checkout metadata the seller intends to authorize.
 
 Dynamic signed quotes may be signed either by the seller wallet directly or by an authorized quote signer. This lets a seller keep the settlement wallet separate from a backend hot key. The seller authorizes a signer once with `setQuoteSigner`, and that signer can create dynamic quotes for the seller's listings.
 
@@ -79,6 +82,7 @@ const types = {
     { name: "buyer", type: "address" },
     { name: "purchaseRef", type: "bytes32" },
     { name: "amount", type: "uint256" },
+    { name: "metadataHash", type: "bytes32" },
     { name: "settlementToken", type: "address" },
     { name: "integratorFeeRecipient", type: "address" },
     { name: "integratorFeeAmount", type: "uint256" },
@@ -92,6 +96,7 @@ const message = {
   buyer,
   purchaseRef,
   amount,
+  metadataHash, // hash of seller-defined readable checkout metadata
   settlementToken,
   integratorFeeRecipient, // zero address when no integrator fee is used
   integratorFeeAmount, // zero when no integrator fee is used
@@ -101,13 +106,19 @@ const message = {
 const signature = await signer.signTypedData(domain, types, message);
 ```
 
-The `seller` field in typed data is always the listing seller address, even when the signature is produced by an authorized quote signer. The contract accepts seller-wallet signatures or authorized quote-signer signatures if authorization exists at purchase time.
+The `seller` field in typed data is always the listing seller address, even when the signature is produced by an authorized quote signer. `metadataHash` should commit to the readable off-chain payment-link or checkout metadata you want the seller signature to protect. The contract accepts seller-wallet signatures or authorized quote-signer signatures if authorization exists at purchase time.
 
 The signed EIP-712 type is:
 
 ```text
-SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)
+SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)
 ```
+
+## Listing Metadata
+
+`listingHash` is a seller-scoped `bytes32` metadata commitment stored on-chain with the listing.
+
+Do not put readable product names, SKUs, URLs, usernames, emails, or other business-sensitive metadata directly on-chain. Keep human-readable product details off-chain and bind them to `listingHash` in your own systems or in a seller-signed payment link.
 
 ## Purchase References
 
@@ -126,11 +137,14 @@ The same `purchaseRef` can be reused by different sellers, but cannot be used tw
 ## Source of Truth
 
 The `ReceiptPurchased` event is the source of truth for seller bots, backends, dashboards, and indexers.
+Signed quote purchases emit the signed `metadataHash`; direct fixed-price purchases emit `bytes32(0)`.
 
 Backends can reconcile purchases by:
 
 - `seller`
 - `purchaseRef`
+
+If seller systems also need product context, they should resolve it off-chain from `purchaseRef`, `listingId`, or `listingHash`.
 
 The contract also stores:
 
@@ -171,8 +185,6 @@ The owner can independently pause:
 
 v1 also enforces conservative hard caps:
 
-- title: 96 bytes
-- resourceId: 128 bytes
 - min purchase: 1 USDC (`1e6`)
 - max purchase: 5,000 USDC (`5_000e6`)
 - max quote TTL: 24 hours
