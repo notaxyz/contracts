@@ -279,6 +279,31 @@ contract RevealReceiptStoreTest is Test {
         return keccak256(abi.encodePacked("purchase-", nonce));
     }
 
+    function _makeRawPurchaseRef(uint256 nonce) internal pure returns (string memory) {
+        return string(abi.encodePacked("ord_tg_20260502_", bytes1(uint8(48 + (nonce % 10)))));
+    }
+
+    function _makeStringOfLength(uint256 length) internal pure returns (string memory value) {
+        bytes memory buffer = new bytes(length);
+        for (uint256 i; i < length; ++i) {
+            buffer[i] = bytes1(uint8(97 + (i % 26)));
+        }
+        value = string(buffer);
+    }
+
+    function _expectedPurchaseRefHash(
+        RevealReceiptStore targetStore,
+        address sellerAccount,
+        uint256 listingId,
+        string memory rawPurchaseRef
+    ) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                "zkRevealReceiptRef:v1", block.chainid, address(targetStore), sellerAccount, listingId, rawPurchaseRef
+            )
+        );
+    }
+
     function _expectOnlyOwnerRevert(address caller) internal {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
     }
@@ -799,6 +824,19 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(address(store)), 0);
     }
 
+    function test_PurchaseReceipt_WithCanonicalHashStoresReceiptAndMappings() public {
+        uint256 listingId = _createListingAsSeller();
+        string memory rawPurchaseRef = _makeRawPurchaseRef(5);
+        bytes32 canonicalPurchaseRef = store.hashPurchaseRef(seller, listingId, rawPurchaseRef);
+
+        uint256 receiptId = _purchaseReceiptAs(listingId, buyer, canonicalPurchaseRef);
+
+        RevealReceiptStore.Receipt memory receipt = store.getReceipt(receiptId);
+        assertEq(receipt.purchaseRef, canonicalPurchaseRef);
+        assertEq(store.purchaseRefUsed(seller, canonicalPurchaseRef), true);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, canonicalPurchaseRef), receiptId);
+    }
+
     function test_PurchaseReceipt_PaysProtocolFeeAndSellerNet() public {
         RevealReceiptStore feeStore = _deployStore(500);
         uint256 listingId = _createListingAs(feeStore, seller, listingHash);
@@ -867,6 +905,20 @@ contract RevealReceiptStoreTest is Test {
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
         store.purchaseReceipt(listingId, purchaseRef);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseReceipt_CanonicalHashDuplicateSameSellerReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        string memory rawPurchaseRef = _makeRawPurchaseRef(6);
+        bytes32 canonicalPurchaseRef = store.hashPurchaseRef(seller, listingId, rawPurchaseRef);
+
+        _purchaseReceiptAs(listingId, buyer, canonicalPurchaseRef);
+
+        vm.startPrank(buyer2);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseReceipt(listingId, canonicalPurchaseRef);
         vm.stopPrank();
     }
 
@@ -1519,6 +1571,63 @@ contract RevealReceiptStoreTest is Test {
 
         assertEq(digest, expectedDigest);
         assertEq(recoveredSigner, seller);
+    }
+
+    function test_HashPurchaseRef_MatchesCanonicalEncoding() public {
+        uint256 listingId = _createListingAsSeller();
+        string memory rawPurchaseRef = _makeRawPurchaseRef(1);
+
+        bytes32 purchaseRefHash = store.hashPurchaseRef(seller, listingId, rawPurchaseRef);
+        bytes32 expectedHash = _expectedPurchaseRefHash(store, seller, listingId, rawPurchaseRef);
+
+        assertEq(purchaseRefHash, expectedHash);
+    }
+
+    function test_HashPurchaseRef_SameInputsReturnSameHash() public {
+        uint256 listingId = _createListingAsSeller();
+        string memory rawPurchaseRef = _makeRawPurchaseRef(2);
+
+        bytes32 firstHash = store.hashPurchaseRef(seller, listingId, rawPurchaseRef);
+        bytes32 secondHash = store.hashPurchaseRef(seller, listingId, rawPurchaseRef);
+
+        assertEq(firstHash, secondHash);
+    }
+
+    function test_HashPurchaseRef_DifferentListingReturnsDifferentHash() public {
+        uint256 listingId1 = _createListingAs(seller, listingHash);
+        uint256 listingId2 = _createListingAs(seller, listingHash2);
+        string memory rawPurchaseRef = _makeRawPurchaseRef(3);
+
+        bytes32 firstHash = store.hashPurchaseRef(seller, listingId1, rawPurchaseRef);
+        bytes32 secondHash = store.hashPurchaseRef(seller, listingId2, rawPurchaseRef);
+
+        assertNotEq(firstHash, secondHash);
+    }
+
+    function test_HashPurchaseRef_DifferentSellerReturnsDifferentHash() public {
+        uint256 listingId1 = _createListingAs(seller, listingHash);
+        uint256 listingId2 = _createListingAs(seller2, listingHash2);
+        string memory rawPurchaseRef = _makeRawPurchaseRef(4);
+
+        bytes32 firstHash = store.hashPurchaseRef(seller, listingId1, rawPurchaseRef);
+        bytes32 secondHash = store.hashPurchaseRef(seller2, listingId2, rawPurchaseRef);
+
+        assertNotEq(firstHash, secondHash);
+    }
+
+    function test_HashPurchaseRef_EmptyRawPurchaseRefReverts() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.expectRevert(RevealReceiptStore.InvalidPurchaseRef.selector);
+        store.hashPurchaseRef(seller, listingId, "");
+    }
+
+    function test_HashPurchaseRef_RawPurchaseRefTooLongReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        string memory rawPurchaseRef = _makeStringOfLength(129);
+
+        vm.expectRevert(RevealReceiptStore.InvalidPurchaseRef.selector);
+        store.hashPurchaseRef(seller, listingId, rawPurchaseRef);
     }
 
     function test_PurchaseSignedReceipt_MetadataHashMismatchInvalidatesSignature() public {
