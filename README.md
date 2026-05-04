@@ -396,14 +396,16 @@ export PROTOCOL_OWNER="0xYOUR_OWNER"
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
 ```
 
-Current Arbitrum Sepolia deployment as of 2026-04-30:
+Current Arbitrum Sepolia deployment as of 2026-05-04:
 
 - chain ID: `421614`
-- contract: `0x55743A4e0836cc3c3f6189fC19e1e19a7F3c84c8`
-- deploy tx: `0xdf54cc481b7992d7b3016dd832384ca63dcbe0eb75b5b5e15a45ab2eaba1bb9a`
+- contract: `0x4205B0b2c02e01771A7F7DE0A9Eb603DF96b273b`
+- deploy tx: `0x5f0eaeeb77ad6601f7588cb1372f11c7c0cf8f85f19d07e799f14df9c664a967`
+- block: `265392755`
 - settlement token: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
+- fee recipient: `0x756c9D74142f39D219f71A2518893583F4E182DD`
 - owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
-- protocol fee bps: `0`
+- protocol fee bps: `500`
 
 ## Roadmap
 
