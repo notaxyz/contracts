@@ -51,6 +51,9 @@ validation path as `purchaseSignedReceipt` without moving funds or creating a re
 Use `previewSignedReceiptPurchase(quote)` only for fee math. It does not verify signature, buyer
 match, quote expiry, listing status, or replay status.
 
+Listing and receipt discovery should be handled from `ListingCreated` and `ReceiptPurchased`
+events or by an indexer, not by on-chain enumeration.
+
 ## Hashes, Metadata, and Privacy
 
 `listingHash`, `purchaseRef`, and `metadataHash` are opaque commitments and identifiers. They are
@@ -66,7 +69,8 @@ dashboards.
 
 ### Purchase Reference Scoping
 
-- on-chain uniqueness is enforced as `purchaseRefUsed[seller][purchaseRef]`
+- on-chain uniqueness and deterministic reconciliation are enforced through
+  `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`, where `0` means unused
 - the canonical helper is `hashPurchaseRef(seller, listingId, rawPurchaseRef)`
 - the canonical hash includes the domain string, `block.chainid`, contract address, seller,
   listing ID, and raw purchase reference

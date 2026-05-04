@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
 
@@ -317,6 +318,8 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function test_CreateListing_SetsFields() public {
+        assertEq(store.listingCountBySeller(seller), 0);
+
         uint256 listingId = _createListingAsSeller();
 
         RevealReceiptStore.Listing memory listing = store.getListing(listingId);
@@ -331,10 +334,24 @@ contract RevealReceiptStoreTest is Test {
         assertEq(storedListingHash, listingHash);
         assertEq(listingUnitPrice, unitPrice);
         assertEq(listingActive, true);
+        assertEq(store.listingCountBySeller(seller), 1);
+    }
 
-        uint256[] memory listingIds = store.getListingsBySeller(seller);
-        assertEq(listingIds.length, 1);
-        assertEq(listingIds[0], listingId);
+    function test_ListingCountBySeller_StartsAtZero() public view {
+        assertEq(store.listingCountBySeller(seller), 0);
+        assertEq(store.listingCountBySeller(seller2), 0);
+    }
+
+    function test_ListingCountBySeller_IncrementsAfterCreateListing() public {
+        assertEq(store.listingCountBySeller(seller), 0);
+
+        uint256 listingId1 = _createListingAsSeller();
+        uint256 listingId2 = _createListingAs(seller, listingHash2);
+
+        assertEq(listingId1, 1);
+        assertEq(listingId2, 2);
+        assertEq(store.listingCountBySeller(seller), 2);
+        assertEq(store.listingCountBySeller(seller2), 0);
     }
 
     function test_CreateListing_ZeroListingHashReverts() public {
@@ -501,16 +518,16 @@ contract RevealReceiptStoreTest is Test {
             assertEq(listingId, i + 1);
         }
 
+        assertEq(store.listingCountBySeller(seller), maxListings);
+
         vm.prank(seller);
         vm.expectRevert(RevealReceiptStore.SellerListingLimitReached.selector);
         store.createListing(_makeListingHash(maxListings), unitPrice);
 
         uint256 seller2ListingId = _createListingAs(seller2, _makeListingHash(maxListings + 1));
-        uint256[] memory sellerListingIds = store.getListingsBySeller(seller);
-        uint256[] memory seller2ListingIds = store.getListingsBySeller(seller2);
         assertEq(seller2ListingId, maxListings + 1);
-        assertEq(sellerListingIds.length, maxListings);
-        assertEq(seller2ListingIds.length, 1);
+        assertEq(store.listingCountBySeller(seller), maxListings);
+        assertEq(store.listingCountBySeller(seller2), 1);
     }
 
     function test_SetListingActive_TogglesAndBlocksPurchases() public {
@@ -755,12 +772,10 @@ contract RevealReceiptStoreTest is Test {
         store.setListingActive(listingId, false);
 
         RevealReceiptStore.Listing memory listing = store.getListing(listingId);
-        uint256[] memory sellerListingIds = store.getListingsBySeller(seller);
 
         assertEq(listing.unitPrice, updatedUnitPrice);
         assertFalse(listing.active);
-        assertEq(sellerListingIds.length, 1);
-        assertEq(sellerListingIds[0], listingId);
+        assertEq(store.listingCountBySeller(seller), 1);
     }
 
     function test_PurchasesPause_UnpauseRestoresPurchases() public {
@@ -794,7 +809,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.SellerPaid(1, listingId, seller, unitPrice);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, unitPrice, bytes32(0));
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0));
 
         uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef);
         vm.stopPrank();
@@ -802,23 +817,12 @@ contract RevealReceiptStoreTest is Test {
         assertEq(receiptId, 1);
 
         RevealReceiptStore.Receipt memory receipt = store.getReceipt(receiptId);
-        assertEq(receipt.exists, true);
         assertEq(receipt.listingId, listingId);
         assertEq(receipt.seller, seller);
         assertEq(receipt.buyer, buyer);
         assertEq(receipt.amount, unitPrice);
         assertEq(receipt.purchaseRef, purchaseRef);
         assertEq(receipt.issuedAt, block.timestamp);
-
-        uint256[] memory buyerReceiptIds = store.getReceiptsByBuyer(buyer);
-        assertEq(buyerReceiptIds.length, 1);
-        assertEq(buyerReceiptIds[0], receiptId);
-
-        uint256[] memory sellerReceiptIds = store.getReceiptsBySeller(seller);
-        assertEq(sellerReceiptIds.length, 1);
-        assertEq(sellerReceiptIds[0], receiptId);
-
-        assertEq(store.purchaseRefUsed(seller, purchaseRef), true);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - unitPrice);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + unitPrice);
@@ -835,7 +839,6 @@ contract RevealReceiptStoreTest is Test {
 
         RevealReceiptStore.Receipt memory receipt = store.getReceipt(receiptId);
         assertEq(receipt.purchaseRef, canonicalPurchaseRef);
-        assertEq(store.purchaseRefUsed(seller, canonicalPurchaseRef), true);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, canonicalPurchaseRef), receiptId);
     }
 
@@ -856,7 +859,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.SellerPaid(1, listingId, seller, unitPrice - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, unitPrice, bytes32(0));
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0));
 
         feeStore.purchaseReceipt(listingId, purchaseRef);
         vm.stopPrank();
@@ -881,7 +884,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.SellerPaid(1, listingId, seller, updatedUnitPrice);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, updatedUnitPrice, bytes32(0));
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, updatedUnitPrice, bytes32(0));
 
         uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef);
         vm.stopPrank();
@@ -950,8 +953,6 @@ contract RevealReceiptStoreTest is Test {
 
         assertEq(receiptId1, 1);
         assertEq(receiptId2, 2);
-        assertEq(store.purchaseRefUsed(seller, purchaseRef), true);
-        assertEq(store.purchaseRefUsed(seller2, purchaseRef), true);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId1);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), receiptId2);
     }
@@ -985,7 +986,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, metadataHash);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
 
         uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
         vm.stopPrank();
@@ -1026,7 +1027,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, metadataHash);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
 
         uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
         vm.stopPrank();
@@ -1078,7 +1079,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee - integratorFeeAmount);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, metadataHash);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
 
         uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
         vm.stopPrank();
@@ -1223,15 +1224,12 @@ contract RevealReceiptStoreTest is Test {
             harnessStore.purchaseSignedReceiptForPayerAndExpectedBuyer(quote, signature, gatewayAdapter, buyer);
 
         RevealReceiptStore.Receipt memory receipt = harnessStore.getReceipt(receiptId);
-        uint256[] memory buyerReceiptIds = harnessStore.getReceiptsByBuyer(buyer);
 
         assertEq(receiptId, 1);
         assertEq(receipt.buyer, buyer);
         assertEq(receipt.seller, seller);
         assertEq(receipt.amount, quotedAmount);
         assertEq(receipt.purchaseRef, purchaseRef);
-        assertEq(buyerReceiptIds.length, 1);
-        assertEq(buyerReceiptIds[0], receiptId);
         assertEq(harnessStore.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
         assertEq(usdc.balanceOf(gatewayAdapter), gatewayAdapterBalanceBefore - quotedAmount);
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore);
@@ -1329,7 +1327,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, purchaseRef, listingId, buyer, quotedAmount, metadataHash);
+        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
 
         uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
         vm.stopPrank();
@@ -1567,8 +1565,6 @@ contract RevealReceiptStoreTest is Test {
 
         assertEq(receiptId1, 1);
         assertEq(receiptId2, 2);
-        assertEq(store.purchaseRefUsed(seller, purchaseRef), true);
-        assertEq(store.purchaseRefUsed(seller2, purchaseRef), true);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId1);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), receiptId2);
     }
@@ -1765,6 +1761,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
         store.validateSignedReceiptPurchase(quote, signature, buyer);
         assertEq(receiptId, 1);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
     }
 
     function test_PreviewSignedReceiptPurchase_ReturnsExpectedValues() public {
@@ -2026,21 +2023,63 @@ contract RevealReceiptStoreTest is Test {
         store.getReceipt(999);
     }
 
-    function test_GetReceiptsByBuyerAndSeller_TracksMultipleReceipts() public {
-        uint256 listingId1 = _createListingAsSeller();
-        uint256 listingId2 = _createListingAs(seller, listingHash2);
+    function test_GetReceipt_UsesSellerSentinelForExistence() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 receiptId = _purchaseReceiptAs(listingId, buyer, purchaseRef);
 
-        uint256 receiptId1 = _purchaseReceiptAs(listingId1, buyer, purchaseRef);
-        uint256 receiptId2 = _purchaseReceiptAs(listingId2, buyer, purchaseRef2);
+        RevealReceiptStore.Receipt memory receipt = store.getReceipt(receiptId);
+        assertEq(receipt.listingId, listingId);
+        assertEq(receipt.seller, seller);
+        assertEq(receipt.buyer, buyer);
 
-        uint256[] memory buyerReceiptIds = store.getReceiptsByBuyer(buyer);
-        assertEq(buyerReceiptIds.length, 2);
-        assertEq(buyerReceiptIds[0], receiptId1);
-        assertEq(buyerReceiptIds[1], receiptId2);
+        (
+            uint256 storedListingId,
+            address storedSeller,
+            address storedBuyer,
+            uint256 storedAmount,
+            bytes32 storedRef,
+            uint64 issuedAt
+        ) = store.receipts(999);
+        assertEq(storedListingId, 0);
+        assertEq(storedSeller, address(0));
+        assertEq(storedBuyer, address(0));
+        assertEq(storedAmount, 0);
+        assertEq(storedRef, bytes32(0));
+        assertEq(issuedAt, 0);
 
-        uint256[] memory sellerReceiptIds = store.getReceiptsBySeller(seller);
-        assertEq(sellerReceiptIds.length, 2);
-        assertEq(sellerReceiptIds[0], receiptId1);
-        assertEq(sellerReceiptIds[1], receiptId2);
+        vm.expectRevert(RevealReceiptStore.ReceiptNotFound.selector);
+        store.getReceipt(999);
+    }
+
+    function test_ReceiptPurchased_EventIndexesBuyerAndEmitsPurchaseRefInData() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.recordLogs();
+        uint256 receiptId = _purchaseReceiptAs(listingId, buyer, purchaseRef);
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+
+        bytes32 receiptPurchasedTopic0 =
+            keccak256("ReceiptPurchased(uint256,address,address,uint256,bytes32,uint256,bytes32)");
+        bool found;
+
+        for (uint256 i; i < entries.length; ++i) {
+            if (entries[i].topics.length == 4 && entries[i].topics[0] == receiptPurchasedTopic0) {
+                found = true;
+                assertEq(entries[i].topics[1], bytes32(receiptId));
+                assertEq(entries[i].topics[2], bytes32(uint256(uint160(seller))));
+                assertEq(entries[i].topics[3], bytes32(uint256(uint160(buyer))));
+
+                (uint256 loggedListingId, bytes32 loggedPurchaseRef, uint256 loggedAmount, bytes32 loggedMetadataHash) =
+                    abi.decode(entries[i].data, (uint256, bytes32, uint256, bytes32));
+
+                assertEq(loggedListingId, listingId);
+                assertEq(loggedPurchaseRef, purchaseRef);
+                assertEq(loggedAmount, unitPrice);
+                assertEq(loggedMetadataHash, bytes32(0));
+                break;
+            }
+        }
+
+        assertTrue(found);
     }
 }

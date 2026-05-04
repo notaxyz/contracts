@@ -15,7 +15,9 @@ import {FeeMath} from "./FeeMath.sol";
 /// @notice Seller-first managed receipt contract for zkReveal Receipt Mode.
 /// @dev Sellers create listings with opaque metadata commitments, buyers pay with seller-scoped
 /// `purchaseRef` hashes derived from off-chain raw purchase references, and settlement completes
-/// immediately with an on-chain receipt record.
+/// immediately with an on-chain receipt record. Listing and receipt discovery is expected to be
+/// handled from events by indexers or seller systems, while the contract keeps deterministic
+/// purchase reconciliation on-chain.
 contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
@@ -65,9 +67,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         bool active;
     }
 
-    /// @dev Receipt Mode proof-of-payment record. Fulfillment meaning remains off-chain in seller systems.
+    /// @dev Receipt Mode proof-of-payment record. Fulfillment meaning remains off-chain in seller
+    ///      systems. Receipt discovery is expected to come from events or indexers.
     struct Receipt {
-        bool exists;
         uint256 listingId;
         address seller;
         address buyer;
@@ -130,20 +132,19 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     mapping(uint256 => Listing) public listings;
     mapping(uint256 => Receipt) public receipts;
-    mapping(address => uint256[]) public listingsBySeller;
-    mapping(address => uint256[]) public receiptsByBuyer;
-    mapping(address => uint256[]) public receiptsBySeller;
+    /// @dev Enforces `MAX_LISTINGS_PER_SELLER`. Listing discovery is expected to come from
+    ///      `ListingCreated` events or indexers, not on-chain enumeration.
+    mapping(address seller => uint256 count) public listingCountBySeller;
     /// @dev Seller-wide quote signer authorization.
     ///      `authorizedQuoteSigners[seller][signer] = true` means `signer` may sign
     ///      `SignedReceiptQuote` values for any listing owned by `seller`.
     mapping(address seller => mapping(address signer => bool)) public authorizedQuoteSigners;
     /// @dev Number of currently authorized seller-wide quote signers for each seller.
     mapping(address seller => uint256 count) public authorizedQuoteSignerCount;
-    /// @dev Seller-scoped `purchaseRef` hashes are derived from off-chain `rawPurchaseRef` values.
-    ///      Uniqueness is enforced per seller as `purchaseRefUsed[seller][purchaseRef]`.
-    mapping(address => mapping(bytes32 => bool)) public purchaseRefUsed;
     /// @dev Deterministic seller-scoped reconciliation helper for `purchaseRef` hashes derived
-    ///      from off-chain `rawPurchaseRef` values. Returns 0 if unused.
+    ///      from off-chain `rawPurchaseRef` values. This is the on-chain replay protection source
+    ///      of truth and returns 0 if unused. Listing and receipt discovery is expected to be
+    ///      handled from events or indexers.
     mapping(address => mapping(bytes32 => uint256)) public receiptIdBySellerAndPurchaseRef;
 
     bool public listingCreationPaused;
@@ -167,9 +168,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     event ReceiptPurchased(
         uint256 indexed receiptId,
         address indexed seller,
-        bytes32 indexed purchaseRef,
+        address indexed buyer,
         uint256 listingId,
-        address buyer,
+        bytes32 purchaseRef,
         uint256 amount,
         bytes32 metadataHash
     );
@@ -310,12 +311,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         uint256 receiptId,
         uint256 listingId,
         address seller,
-        uint256 amount,
-        address integratorFeeRecipient,
-        uint256 integratorFeeAmount
+        RakeQuote memory rake
     ) internal {
-        RakeQuote memory rake = _quoteRake(amount, integratorFeeRecipient, integratorFeeAmount);
-
         if (rake.protocolFee > 0) {
             settlementToken.safeTransfer(rake.protocolFeeRecipient, rake.protocolFee);
             emit ProtocolFeePaid(receiptId, listingId, rake.protocolFeeRecipient, rake.protocolFee);
@@ -359,7 +356,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     }
 
     function _receiptExists(uint256 receiptId) internal view {
-        if (!receipts[receiptId].exists) revert ReceiptNotFound();
+        if (receipts[receiptId].seller == address(0)) revert ReceiptNotFound();
     }
 
     function _onlyListingSeller(uint256 listingId) internal view {
@@ -381,7 +378,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
         if (quote.expiresAt <= block.timestamp) revert QuoteExpired();
         if (quote.expiresAt > block.timestamp + MAX_QUOTE_TTL) revert QuoteExpiryTooLong();
-        if (purchaseRefUsed[listing.seller][quote.purchaseRef]) revert PurchaseRefAlreadyUsed();
+        if (receiptIdBySellerAndPurchaseRef[listing.seller][quote.purchaseRef] != 0) {
+            revert PurchaseRefAlreadyUsed();
+        }
 
         bytes32 digest = _hashSignedReceiptQuote(quote, listing.seller);
         signer = ECDSA.recover(digest, sellerSignature);
@@ -431,14 +430,13 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         address integratorFeeRecipient,
         uint256 integratorFeeAmount
     ) internal returns (uint256 receiptId) {
-        settlementToken.safeTransferFrom(payer, address(this), amount);
+        RakeQuote memory rake = _quoteRake(amount, integratorFeeRecipient, integratorFeeAmount);
 
-        purchaseRefUsed[seller][purchaseRef] = true;
+        settlementToken.safeTransferFrom(payer, address(this), amount);
 
         receiptId = nextReceiptId++;
 
         Receipt storage receipt = receipts[receiptId];
-        receipt.exists = true;
         receipt.listingId = listingId;
         receipt.seller = seller;
         receipt.buyer = receiptBuyer;
@@ -446,15 +444,11 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         receipt.purchaseRef = purchaseRef;
         receipt.issuedAt = uint64(block.timestamp);
 
-        receiptsByBuyer[receiptBuyer].push(receiptId);
-        receiptsBySeller[seller].push(receiptId);
         receiptIdBySellerAndPurchaseRef[seller][purchaseRef] = receiptId;
 
-        _distributeReceiptPurchaseProceeds(
-            receiptId, listingId, seller, amount, integratorFeeRecipient, integratorFeeAmount
-        );
+        _distributeReceiptPurchaseProceeds(receiptId, listingId, seller, rake);
 
-        emit ReceiptPurchased(receiptId, seller, purchaseRef, listingId, receiptBuyer, amount, metadataHash);
+        emit ReceiptPurchased(receiptId, seller, receiptBuyer, listingId, purchaseRef, amount, metadataHash);
     }
 
     // -------------------------------------------------------------------------
@@ -521,7 +515,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         if (listingCreationPaused) revert ListingCreationPaused();
         if (listingHash == bytes32(0)) revert InvalidParams();
         _validatePurchaseAmount(unitPrice);
-        if (listingsBySeller[msg.sender].length >= MAX_LISTINGS_PER_SELLER) {
+        if (listingCountBySeller[msg.sender] >= MAX_LISTINGS_PER_SELLER) {
             revert SellerListingLimitReached();
         }
 
@@ -533,7 +527,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         listing.unitPrice = unitPrice;
         listing.active = true;
 
-        listingsBySeller[msg.sender].push(listingId);
+        listingCountBySeller[msg.sender]++;
 
         emit ListingCreated(listingId, msg.sender, listingHash, unitPrice);
     }
@@ -574,7 +568,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      `purchaseRef` must remain unique per seller. Use `purchaseSignedReceipt` instead for
     ///      buyer-bound payment links, private checkout flows, dynamic pricing, or integrator fees.
     ///      Payment settles immediately and fulfillment remains entirely off-chain in seller
-    ///      systems.
+    ///      systems. Receipt discovery is expected to be handled from `ReceiptPurchased` events or
+    ///      indexers.
     function purchaseReceipt(uint256 listingId, bytes32 purchaseRef)
         external
         nonReentrant
@@ -586,7 +581,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
         if (!listing.active) revert ListingInactive();
         if (purchaseRef == bytes32(0)) revert InvalidParams();
-        if (purchaseRefUsed[listing.seller][purchaseRef]) revert PurchaseRefAlreadyUsed();
+        if (receiptIdBySellerAndPurchaseRef[listing.seller][purchaseRef] != 0) {
+            revert PurchaseRefAlreadyUsed();
+        }
 
         return _settleReceiptPurchase(
             listingId, listing.seller, msg.sender, msg.sender, listing.unitPrice, purchaseRef, bytes32(0), address(0), 0
@@ -754,22 +751,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Getters
-    // -------------------------------------------------------------------------
-
-    function getListingsBySeller(address seller) external view returns (uint256[] memory) {
-        return listingsBySeller[seller];
-    }
-
-    function getReceiptsByBuyer(address buyer) external view returns (uint256[] memory) {
-        return receiptsByBuyer[buyer];
-    }
-
-    function getReceiptsBySeller(address seller) external view returns (uint256[] memory) {
-        return receiptsBySeller[seller];
-    }
-
     function getListing(uint256 listingId) external view listingExists(listingId) returns (Listing memory) {
         return listings[listingId];
     }
@@ -780,8 +761,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     /// @notice Return the receipt ID for a seller-scoped `purchaseRef`, or 0 if unused.
     /// @dev Sellers, bots, and indexers can recompute the canonical hash from a revealed
-    ///      `rawPurchaseRef` via `hashPurchaseRef` and use this getter to verify the matching
-    ///      receipt.
+    ///      `rawPurchaseRef` via `hashPurchaseRef` and use this getter as a deterministic on-chain
+    ///      reconciliation helper for the matching receipt.
     function getReceiptIdBySellerAndPurchaseRef(address seller, bytes32 purchaseRef) external view returns (uint256) {
         return receiptIdBySellerAndPurchaseRef[seller][purchaseRef];
     }
