@@ -7,6 +7,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 
+import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
 import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
 
 contract ReceiptMockUSDC is ERC20 {
@@ -22,9 +23,13 @@ contract ReceiptMockUSDC is ERC20 {
 }
 
 contract RevealReceiptStoreHarness is RevealReceiptStore {
-    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_, address owner_)
-        RevealReceiptStore(settlementToken_, feeRecipient_, protocolFeeBps_, owner_)
-    {}
+    constructor(
+        address settlementToken_,
+        address purchaseRefRegistry_,
+        address feeRecipient_,
+        uint16 protocolFeeBps_,
+        address owner_
+    ) RevealReceiptStore(settlementToken_, purchaseRefRegistry_, feeRecipient_, protocolFeeBps_, owner_) {}
 
     function purchaseSignedReceiptForPayerAndExpectedBuyer(
         SignedReceiptQuote calldata quote,
@@ -67,6 +72,7 @@ contract RevealReceiptStoreTest is Test {
     uint256 internal constant ATTACKER_PK = 0xD00D;
 
     ReceiptMockUSDC usdc;
+    PurchaseRefRegistry registry;
     RevealReceiptStore store;
 
     address seller;
@@ -89,11 +95,12 @@ contract RevealReceiptStoreTest is Test {
 
     function setUp() public {
         usdc = new ReceiptMockUSDC();
+        registry = new PurchaseRefRegistry();
         seller = vm.addr(SELLER_PK);
         seller2 = vm.addr(SELLER2_PK);
         quoteSigner = vm.addr(QUOTE_SIGNER_PK);
         attacker = vm.addr(ATTACKER_PK);
-        store = new RevealReceiptStore(address(usdc), feeRecipient, 0, address(this));
+        store = new RevealReceiptStore(address(usdc), address(registry), feeRecipient, 0, address(this));
 
         usdc.mint(buyer, 10_000_000_000);
         usdc.mint(buyer2, 10_000_000_000);
@@ -107,22 +114,37 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function _deployStore(uint16 feeBps) internal returns (RevealReceiptStore deployedStore) {
-        deployedStore = _deployStore(feeBps, address(this));
+        deployedStore = _deployStore(feeBps, address(this), registry);
     }
 
     function _deployStore(uint16 feeBps, address owner_) internal returns (RevealReceiptStore deployedStore) {
-        deployedStore = new RevealReceiptStore(address(usdc), feeRecipient, feeBps, owner_);
+        deployedStore = _deployStore(feeBps, owner_, registry);
+    }
+
+    function _deployStore(uint16 feeBps, address owner_, PurchaseRefRegistry targetRegistry)
+        internal
+        returns (RevealReceiptStore deployedStore)
+    {
+        deployedStore = new RevealReceiptStore(address(usdc), address(targetRegistry), feeRecipient, feeBps, owner_);
     }
 
     function _deployHarnessStore(uint16 feeBps) internal returns (RevealReceiptStoreHarness deployedStore) {
-        deployedStore = _deployHarnessStore(feeBps, address(this));
+        deployedStore = _deployHarnessStore(feeBps, address(this), registry);
     }
 
     function _deployHarnessStore(uint16 feeBps, address owner_)
         internal
         returns (RevealReceiptStoreHarness deployedStore)
     {
-        deployedStore = new RevealReceiptStoreHarness(address(usdc), feeRecipient, feeBps, owner_);
+        deployedStore = _deployHarnessStore(feeBps, owner_, registry);
+    }
+
+    function _deployHarnessStore(uint16 feeBps, address owner_, PurchaseRefRegistry targetRegistry)
+        internal
+        returns (RevealReceiptStoreHarness deployedStore)
+    {
+        deployedStore =
+            new RevealReceiptStoreHarness(address(usdc), address(targetRegistry), feeRecipient, feeBps, owner_);
     }
 
     function _createListingAs(address sellerAccount, bytes32 sellerListingHash) internal returns (uint256 listingId) {
@@ -241,8 +263,6 @@ contract RevealReceiptStoreTest is Test {
         RevealReceiptStore targetStore,
         RevealReceiptStore.SignedReceiptQuote memory quote
     ) internal view returns (bytes32) {
-        RevealReceiptStore.Listing memory listing = targetStore.getListing(quote.listingId);
-
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
@@ -253,7 +273,18 @@ contract RevealReceiptStoreTest is Test {
             )
         );
 
-        bytes32 structHash = keccak256(
+        return keccak256(
+            abi.encodePacked("\x19\x01", domainSeparator, _expectedSignedReceiptQuoteStructHash(targetStore, quote))
+        );
+    }
+
+    function _expectedSignedReceiptQuoteStructHash(
+        RevealReceiptStore targetStore,
+        RevealReceiptStore.SignedReceiptQuote memory quote
+    ) internal view returns (bytes32) {
+        RevealReceiptStore.Listing memory listing = targetStore.getListing(quote.listingId);
+
+        return keccak256(
             abi.encode(
                 targetStore.SIGNED_RECEIPT_QUOTE_TYPEHASH(),
                 quote.listingId,
@@ -263,13 +294,12 @@ contract RevealReceiptStoreTest is Test {
                 quote.amount,
                 quote.metadataHash,
                 address(targetStore.settlementToken()),
+                address(targetStore.purchaseRefRegistry()),
                 quote.integratorFeeRecipient,
                 quote.integratorFeeAmount,
                 quote.expiresAt
             )
         );
-
-        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
     function _makeListingHash(uint256 nonce) internal pure returns (bytes32) {
@@ -292,21 +322,105 @@ contract RevealReceiptStoreTest is Test {
         value = string(buffer);
     }
 
-    function _expectedPurchaseRefHash(
-        RevealReceiptStore targetStore,
-        address sellerAccount,
-        uint256 listingId,
-        string memory rawPurchaseRef
-    ) internal view returns (bytes32) {
+    function _expectedPurchaseRefHash(address sellerAccount, string memory rawPurchaseRef)
+        internal
+        view
+        returns (bytes32)
+    {
         return keccak256(
-            abi.encode(
-                "zkRevealReceiptRef:v1", block.chainid, address(targetStore), sellerAccount, listingId, rawPurchaseRef
-            )
+            abi.encode("zkReveal.purchaseRef.receipt.v1", block.chainid, address(usdc), sellerAccount, rawPurchaseRef)
         );
+    }
+
+    function _assertRegistryConsumption(bytes32 ref, address expectedConsumer) internal view {
+        (address consumer, uint64 consumedAt) = registry.consumptions(ref);
+
+        assertEq(consumer, expectedConsumer);
+        assertEq(registry.consumedBy(ref), expectedConsumer);
+        assertTrue(registry.isConsumed(ref));
+        assertGt(uint256(consumedAt), 0);
+    }
+
+    function _assertRegistryNotConsumed(bytes32 ref) internal view {
+        (address consumer, uint64 consumedAt) = registry.consumptions(ref);
+
+        assertEq(consumer, address(0));
+        assertEq(uint256(consumedAt), 0);
+        assertEq(registry.consumedBy(ref), address(0));
+        assertFalse(registry.isConsumed(ref));
     }
 
     function _expectOnlyOwnerRevert(address caller) internal {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
+    }
+
+    function test_PurchaseRefRegistry_ConsumesPurchaseRefOnce() public {
+        registry.consume(purchaseRef);
+
+        _assertRegistryConsumption(purchaseRef, address(this));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PurchaseRefRegistry.PurchaseRefAlreadyConsumed.selector, purchaseRef, address(this))
+        );
+        registry.consume(purchaseRef);
+    }
+
+    function test_PurchaseRefRegistry_RejectsZeroPurchaseRef() public {
+        vm.expectRevert(PurchaseRefRegistry.InvalidPurchaseRef.selector);
+        registry.consume(bytes32(0));
+    }
+
+    function test_PurchaseRefRegistry_InitialStateIsEmpty() public view {
+        (address consumer, uint64 consumedAt) = registry.consumptions(purchaseRef);
+
+        assertFalse(registry.isConsumed(purchaseRef));
+        assertEq(registry.consumedBy(purchaseRef), address(0));
+        assertEq(consumer, address(0));
+        assertEq(uint256(consumedAt), 0);
+    }
+
+    function test_PurchaseRefRegistry_ConsumeEmitsEvent() public {
+        uint64 expectedConsumedAt = uint64(block.timestamp);
+
+        vm.expectEmit(true, true, false, true);
+        emit PurchaseRefRegistry.PurchaseRefConsumed(purchaseRef, buyer, expectedConsumedAt);
+
+        vm.prank(buyer);
+        registry.consume(purchaseRef);
+
+        _assertRegistryConsumption(purchaseRef, buyer);
+    }
+
+    function test_PurchaseRefRegistry_DifferentCallersCannotConsumeSameRef() public {
+        vm.prank(buyer);
+        registry.consume(purchaseRef);
+
+        vm.prank(buyer2);
+        vm.expectRevert(
+            abi.encodeWithSelector(PurchaseRefRegistry.PurchaseRefAlreadyConsumed.selector, purchaseRef, buyer)
+        );
+        registry.consume(purchaseRef);
+    }
+
+    function test_PurchaseRefRegistry_DifferentRefsCanBeConsumedBySameCaller() public {
+        vm.startPrank(buyer);
+        registry.consume(purchaseRef);
+        registry.consume(purchaseRef2);
+        vm.stopPrank();
+
+        _assertRegistryConsumption(purchaseRef, buyer);
+        _assertRegistryConsumption(purchaseRef2, buyer);
+    }
+
+    function test_PurchaseRefRegistry_ConsumedAtUsesBlockTimestamp() public {
+        uint64 expectedConsumedAt = 1_717_171_717;
+        vm.warp(expectedConsumedAt);
+
+        vm.prank(buyer);
+        registry.consume(purchaseRef);
+
+        (, uint64 consumedAt) = registry.consumptions(purchaseRef);
+        assertEq(consumedAt, expectedConsumedAt);
     }
 
     function test_ListingCreated_Emits() public {
@@ -389,31 +503,37 @@ contract RevealReceiptStoreTest is Test {
     function test_Constructor_SucceedsWithValidOwner() public {
         address configuredOwner = address(0xA11CE123);
 
-        RevealReceiptStore ownedStore = new RevealReceiptStore(address(usdc), feeRecipient, 0, configuredOwner);
+        RevealReceiptStore ownedStore =
+            new RevealReceiptStore(address(usdc), address(registry), feeRecipient, 0, configuredOwner);
 
         assertEq(ownedStore.owner(), configuredOwner);
     }
 
     function test_Constructor_InvalidParamsRevert() public {
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(0), feeRecipient, 0, address(this));
+        new RevealReceiptStore(address(0), address(registry), feeRecipient, 0, address(this));
 
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(usdc), address(0), 1, address(this));
+        new RevealReceiptStore(address(usdc), address(registry), address(0), 1, address(this));
 
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(usdc), feeRecipient, 1_001, address(this));
+        new RevealReceiptStore(address(usdc), address(registry), feeRecipient, 1_001, address(this));
+
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        new RevealReceiptStore(address(usdc), address(0), feeRecipient, 0, address(this));
     }
 
     function test_Constructor_ZeroOwnerReverts() public {
         vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
-        new RevealReceiptStore(address(usdc), feeRecipient, 0, address(0));
+        new RevealReceiptStore(address(usdc), address(registry), feeRecipient, 0, address(0));
     }
 
     function test_Constructor_AllowsZeroFeeRecipientWhenFeeDisabled() public {
-        RevealReceiptStore zeroFeeStore = new RevealReceiptStore(address(usdc), address(0), 0, address(this));
+        RevealReceiptStore zeroFeeStore =
+            new RevealReceiptStore(address(usdc), address(registry), address(0), 0, address(this));
 
         assertEq(address(zeroFeeStore.settlementToken()), address(usdc));
+        assertEq(address(zeroFeeStore.purchaseRefRegistry()), address(registry));
         assertEq(zeroFeeStore.feeRecipient(), address(0));
         assertEq(zeroFeeStore.protocolFeeBps(), 0);
     }
@@ -480,7 +600,7 @@ contract RevealReceiptStoreTest is Test {
         assertEq(
             store.SIGNED_RECEIPT_QUOTE_TYPEHASH(),
             keccak256(
-                "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
+                "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
             )
         );
     }
@@ -824,6 +944,7 @@ contract RevealReceiptStoreTest is Test {
         assertEq(receipt.purchaseRef, purchaseRef);
         assertEq(receipt.issuedAt, block.timestamp);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
+        _assertRegistryConsumption(purchaseRef, address(store));
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - unitPrice);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + unitPrice);
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore);
@@ -840,6 +961,20 @@ contract RevealReceiptStoreTest is Test {
         RevealReceiptStore.Receipt memory receipt = store.getReceipt(receiptId);
         assertEq(receipt.purchaseRef, canonicalPurchaseRef);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, canonicalPurchaseRef), receiptId);
+        _assertRegistryConsumption(canonicalPurchaseRef, address(store));
+    }
+
+    function test_PurchaseReceipt_EmitsPurchaseRefConsumedFromRegistry() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), unitPrice);
+
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit PurchaseRefRegistry.PurchaseRefConsumed(purchaseRef, address(store), uint64(block.timestamp));
+
+        store.purchaseReceipt(listingId, purchaseRef);
+        vm.stopPrank();
     }
 
     function test_PurchaseReceipt_PaysProtocolFeeAndSellerNet() public {
@@ -900,7 +1035,7 @@ contract RevealReceiptStoreTest is Test {
 
         vm.startPrank(buyer);
         usdc.approve(address(store), unitPrice);
-        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        vm.expectRevert(RevealReceiptStore.InvalidPurchaseRef.selector);
         store.purchaseReceipt(listingId, bytes32(0));
         vm.stopPrank();
     }
@@ -931,7 +1066,39 @@ contract RevealReceiptStoreTest is Test {
         vm.stopPrank();
     }
 
-    function test_PurchaseReceipt_PurchaseRefUniquePerSellerAcrossListings() public {
+    function test_PurchaseReceipt_SameRawPurchaseRefAcrossListingsReverts() public {
+        uint256 listingId1 = _createListingAs(seller, listingHash);
+        uint256 listingId2 = _createListingAs(seller, listingHash2);
+        string memory rawPurchaseRef = _makeRawPurchaseRef(7);
+        bytes32 listing1PurchaseRef = store.hashPurchaseRef(seller, listingId1, rawPurchaseRef);
+        bytes32 listing2PurchaseRef = store.hashPurchaseRef(seller, listingId2, rawPurchaseRef);
+
+        assertEq(listing1PurchaseRef, listing2PurchaseRef);
+
+        _purchaseReceiptAs(listingId1, buyer, listing1PurchaseRef);
+
+        vm.startPrank(buyer2);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseReceipt(listingId2, listing2PurchaseRef);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseReceipt_DifferentPurchaseRefsStillWork() public {
+        uint256 listingId = _createListingAsSeller();
+
+        uint256 receiptId1 = _purchaseReceiptAs(listingId, buyer, purchaseRef);
+        uint256 receiptId2 = _purchaseReceiptAs(listingId, buyer2, purchaseRef2);
+
+        assertEq(receiptId1, 1);
+        assertEq(receiptId2, 2);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId1);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef2), receiptId2);
+        _assertRegistryConsumption(purchaseRef, address(store));
+        _assertRegistryConsumption(purchaseRef2, address(store));
+    }
+
+    function test_PurchaseReceipt_PurchaseRefReplayAcrossListingsReverts() public {
         uint256 listingId1 = _createListingAs(seller, listingHash);
         uint256 listingId2 = _createListingAs(seller, listingHash2);
 
@@ -944,17 +1111,50 @@ contract RevealReceiptStoreTest is Test {
         vm.stopPrank();
     }
 
-    function test_PurchaseReceipt_AllowsSamePurchaseRefAcrossDifferentSellers() public {
+    function test_PurchaseReceipt_PurchaseRefReplayAcrossDifferentSellersReverts() public {
         uint256 listingId1 = _createListingAs(seller, listingHash);
         uint256 listingId2 = _createListingAs(seller2, listingHash2);
 
         uint256 receiptId1 = _purchaseReceiptAs(listingId1, buyer, purchaseRef);
-        uint256 receiptId2 = _purchaseReceiptAs(listingId2, buyer2, purchaseRef);
 
         assertEq(receiptId1, 1);
-        assertEq(receiptId2, 2);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId1);
-        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), receiptId2);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), 0);
+        _assertRegistryConsumption(purchaseRef, address(store));
+
+        vm.startPrank(buyer2);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseReceipt(listingId2, purchaseRef);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseReceipt_FailedTransferDoesNotConsumeRegistry() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(buyer);
+        vm.expectRevert();
+        store.purchaseReceipt(listingId, purchaseRef);
+
+        _assertRegistryNotConsumed(purchaseRef);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), 0);
+    }
+
+    function test_RegistryCanBlockPurchaseEvenWhenLocalMappingEmpty() public {
+        uint256 listingId = _createListingAsSeller();
+        address externalConsumer = address(0xBAD);
+
+        vm.prank(externalConsumer);
+        registry.consume(purchaseRef);
+
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), 0);
+        assertEq(registry.consumedBy(purchaseRef), externalConsumer);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseReceipt(listingId, purchaseRef);
+        vm.stopPrank();
     }
 
     function test_PurchaseReceipt_NonexistentListingReverts() public {
@@ -998,6 +1198,7 @@ contract RevealReceiptStoreTest is Test {
         assertEq(receipt.seller, seller);
         assertEq(receipt.purchaseRef, purchaseRef);
         assertEq(feeStore.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId);
+        _assertRegistryConsumption(purchaseRef, address(feeStore));
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - quotedAmount);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee));
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
@@ -1472,7 +1673,7 @@ contract RevealReceiptStoreTest is Test {
 
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
-        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        vm.expectRevert(RevealReceiptStore.InvalidPurchaseRef.selector);
         store.purchaseSignedReceipt(quote, signature);
         vm.stopPrank();
     }
@@ -1550,7 +1751,7 @@ contract RevealReceiptStoreTest is Test {
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef2), receiptId);
     }
 
-    function test_PurchaseSignedReceipt_AllowsSamePurchaseRefAcrossDifferentSellers() public {
+    function test_PurchaseSignedReceipt_PurchaseRefReplayAcrossDifferentSellersReverts() public {
         uint256 listingId1 = _createListingAs(seller, listingHash);
         uint256 listingId2 = _createListingAs(store, seller2, listingHash2);
         RevealReceiptStore.SignedReceiptQuote memory quote1 =
@@ -1561,12 +1762,82 @@ contract RevealReceiptStoreTest is Test {
         bytes memory signature2 = _signSignedReceiptQuote(store, SELLER2_PK, quote2);
 
         uint256 receiptId1 = _purchaseSignedReceiptAs(store, buyer, quote1, signature1);
-        uint256 receiptId2 = _purchaseSignedReceiptAs(store, buyer, quote2, signature2);
 
         assertEq(receiptId1, 1);
-        assertEq(receiptId2, 2);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), receiptId1);
-        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), receiptId2);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), 0);
+        _assertRegistryConsumption(purchaseRef, address(store));
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseSignedReceipt(quote2, signature2);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_SharedRegistryBlocksReplayAcrossStores() public {
+        RevealReceiptStore secondStore = _deployStore(0, address(this), registry);
+        uint256 listingId1 = _createListingAs(store, seller, listingHash);
+        uint256 listingId2 = _createListingAs(secondStore, seller2, listingHash2);
+        RevealReceiptStore.SignedReceiptQuote memory quote1 =
+            _makeSignedReceiptQuote(listingId1, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        RevealReceiptStore.SignedReceiptQuote memory quote2 =
+            _makeSignedReceiptQuote(listingId2, buyer2, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature1 = _signSignedReceiptQuote(store, SELLER_PK, quote1);
+        bytes memory signature2 = _signSignedReceiptQuote(secondStore, SELLER2_PK, quote2);
+
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote1, signature1);
+
+        assertEq(receiptId, 1);
+        assertEq(registry.consumedBy(purchaseRef), address(store));
+        assertEq(secondStore.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), 0);
+
+        vm.startPrank(buyer2);
+        usdc.approve(address(secondStore), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        secondStore.purchaseSignedReceipt(quote2, signature2);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_SignatureFromStoreCannotBeUsedOnSecondStore() public {
+        RevealReceiptStore secondStore = _deployStore(0, address(this), registry);
+        uint256 listingId1 = _createListingAs(store, seller, listingHash);
+        uint256 listingId2 = _createListingAs(secondStore, seller, listingHash);
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId1, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(secondStore), quotedAmount);
+        vm.expectRevert(RevealReceiptStore.InvalidQuoteSigner.selector);
+        secondStore.purchaseSignedReceipt(
+            RevealReceiptStore.SignedReceiptQuote({
+                listingId: listingId2,
+                buyer: quote.buyer,
+                purchaseRef: quote.purchaseRef,
+                amount: quote.amount,
+                metadataHash: quote.metadataHash,
+                integratorFeeRecipient: quote.integratorFeeRecipient,
+                integratorFeeAmount: quote.integratorFeeAmount,
+                expiresAt: quote.expiresAt
+            }),
+            signature
+        );
+        vm.stopPrank();
+    }
+
+    function test_PurchaseSignedReceipt_FailedTransferDoesNotConsumeRegistry() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.prank(buyer);
+        vm.expectRevert();
+        store.purchaseSignedReceipt(quote, signature);
+
+        _assertRegistryNotConsumed(purchaseRef);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), 0);
     }
 
     function test_HashSignedReceiptQuote_MatchesTestGeneratedEIP712Digest() public {
@@ -1583,14 +1854,65 @@ contract RevealReceiptStoreTest is Test {
         assertEq(recoveredSigner, seller);
     }
 
+    function test_HashSignedReceiptQuote_DependsOnPurchaseRefRegistry() public {
+        PurchaseRefRegistry secondRegistry = new PurchaseRefRegistry();
+        RevealReceiptStore secondStoreWithDifferentRegistry = _deployStore(0, address(this), secondRegistry);
+        uint256 listingId1 = _createListingAs(store, seller, listingHash);
+        uint256 listingId2 = _createListingAs(secondStoreWithDifferentRegistry, seller, listingHash);
+        RevealReceiptStore.SignedReceiptQuote memory quote1 =
+            _makeSignedReceiptQuote(listingId1, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        RevealReceiptStore.SignedReceiptQuote memory quote2 =
+            _makeSignedReceiptQuote(listingId2, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+
+        bytes32 structHash1 = _expectedSignedReceiptQuoteStructHash(store, quote1);
+        bytes32 structHash2 = _expectedSignedReceiptQuoteStructHash(secondStoreWithDifferentRegistry, quote2);
+
+        assertNotEq(structHash1, structHash2);
+        assertNotEq(
+            store.hashSignedReceiptQuote(quote1), secondStoreWithDifferentRegistry.hashSignedReceiptQuote(quote2)
+        );
+    }
+
     function test_HashPurchaseRef_MatchesCanonicalEncoding() public {
         uint256 listingId = _createListingAsSeller();
         string memory rawPurchaseRef = _makeRawPurchaseRef(1);
 
         bytes32 purchaseRefHash = store.hashPurchaseRef(seller, listingId, rawPurchaseRef);
-        bytes32 expectedHash = _expectedPurchaseRefHash(store, seller, listingId, rawPurchaseRef);
+        bytes32 expectedHash = _expectedPurchaseRefHash(seller, rawPurchaseRef);
 
         assertEq(purchaseRefHash, expectedHash);
+    }
+
+    function test_HashPurchaseRef_DoesNotDependOnReceiptStoreAddress() public {
+        RevealReceiptStore secondStore = _deployStore(0, address(this), registry);
+        string memory rawPurchaseRef = _makeRawPurchaseRef(5);
+
+        uint256 firstListingId = _createListingAs(store, seller, listingHash);
+        uint256 secondListingId = _createListingAs(secondStore, seller, listingHash);
+
+        bytes32 firstHash = store.hashPurchaseRef(seller, firstListingId, rawPurchaseRef);
+        bytes32 secondHash = secondStore.hashPurchaseRef(seller, secondListingId, rawPurchaseRef);
+
+        assertEq(firstListingId, secondListingId);
+        assertEq(firstHash, secondHash);
+    }
+
+    function test_PurchaseReceipt_SharedRegistryBlocksReplayAcrossStores() public {
+        RevealReceiptStore secondStore = _deployStore(0, address(this), registry);
+        uint256 firstListingId = _createListingAs(store, seller, listingHash);
+        uint256 secondListingId = _createListingAs(secondStore, seller2, listingHash2);
+
+        uint256 receiptId = _purchaseReceiptAs(store, firstListingId, buyer, purchaseRef);
+
+        assertEq(receiptId, 1);
+        _assertRegistryConsumption(purchaseRef, address(store));
+        assertEq(secondStore.getReceiptIdBySellerAndPurchaseRef(seller2, purchaseRef), 0);
+
+        vm.startPrank(buyer2);
+        usdc.approve(address(secondStore), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
+        secondStore.purchaseReceipt(secondListingId, purchaseRef);
+        vm.stopPrank();
     }
 
     function test_HashPurchaseRef_SameInputsReturnSameHash() public {
@@ -1603,13 +1925,38 @@ contract RevealReceiptStoreTest is Test {
         assertEq(firstHash, secondHash);
     }
 
-    function test_HashPurchaseRef_DifferentListingReturnsDifferentHash() public {
+    function test_HashPurchaseRef_DifferentRawPurchaseRefReturnsDifferentHash() public {
+        uint256 listingId = _createListingAsSeller();
+        string memory firstRawPurchaseRef = _makeRawPurchaseRef(8);
+        string memory secondRawPurchaseRef = _makeRawPurchaseRef(9);
+
+        bytes32 firstHash = store.hashPurchaseRef(seller, listingId, firstRawPurchaseRef);
+        bytes32 secondHash = store.hashPurchaseRef(seller, listingId, secondRawPurchaseRef);
+
+        assertNotEq(firstHash, secondHash);
+    }
+
+    function test_HashPurchaseRef_DoesNotDependOnListingId() public {
         uint256 listingId1 = _createListingAs(seller, listingHash);
         uint256 listingId2 = _createListingAs(seller, listingHash2);
         string memory rawPurchaseRef = _makeRawPurchaseRef(3);
 
         bytes32 firstHash = store.hashPurchaseRef(seller, listingId1, rawPurchaseRef);
         bytes32 secondHash = store.hashPurchaseRef(seller, listingId2, rawPurchaseRef);
+
+        assertEq(firstHash, secondHash);
+    }
+
+    function test_HashPurchaseRef_DifferentSettlementTokenReturnsDifferentHash() public {
+        ReceiptMockUSDC secondUsdc = new ReceiptMockUSDC();
+        RevealReceiptStore secondStore =
+            new RevealReceiptStore(address(secondUsdc), address(registry), feeRecipient, 0, address(this));
+        uint256 listingId1 = _createListingAs(store, seller, listingHash);
+        uint256 listingId2 = _createListingAs(secondStore, seller, listingHash);
+        string memory rawPurchaseRef = _makeRawPurchaseRef(10);
+
+        bytes32 firstHash = store.hashPurchaseRef(seller, listingId1, rawPurchaseRef);
+        bytes32 secondHash = secondStore.hashPurchaseRef(seller, listingId2, rawPurchaseRef);
 
         assertNotEq(firstHash, secondHash);
     }
@@ -1623,6 +1970,18 @@ contract RevealReceiptStoreTest is Test {
         bytes32 secondHash = store.hashPurchaseRef(seller2, listingId2, rawPurchaseRef);
 
         assertNotEq(firstHash, secondHash);
+    }
+
+    function test_HashPurchaseRef_ListingIdOnlyValidatesOwnership() public {
+        uint256 sellerListingId = _createListingAs(seller, listingHash);
+        uint256 seller2ListingId = _createListingAs(seller2, listingHash2);
+        string memory rawPurchaseRef = _makeRawPurchaseRef(11);
+
+        bytes32 hash = store.hashPurchaseRef(seller, sellerListingId, rawPurchaseRef);
+        assertEq(hash, _expectedPurchaseRefHash(seller, rawPurchaseRef));
+
+        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        store.hashPurchaseRef(seller, seller2ListingId, rawPurchaseRef);
     }
 
     function test_HashPurchaseRef_EmptyRawPurchaseRefReverts() public {
@@ -1747,6 +2106,32 @@ contract RevealReceiptStoreTest is Test {
         store.setListingActive(listingId, false);
 
         vm.expectRevert(RevealReceiptStore.ListingInactive.selector);
+        store.validateSignedReceiptPurchase(quote, signature, buyer);
+    }
+
+    function test_ValidateSignedReceiptPurchase_ZeroPurchaseRefReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, bytes32(0), quotedAmount, uint64(block.timestamp + 1 hours));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.expectRevert(RevealReceiptStore.InvalidPurchaseRef.selector);
+        store.validateSignedReceiptPurchase(quote, signature, buyer);
+    }
+
+    function test_ValidateSignedReceiptPurchase_RegistryConsumedRefRevertsEvenWithoutLocalReceipt() public {
+        uint256 listingId = _createListingAsSeller();
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 hours));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+        address externalConsumer = address(0xBAD);
+
+        vm.prank(externalConsumer);
+        registry.consume(purchaseRef);
+
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), 0);
+
+        vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
         store.validateSignedReceiptPurchase(quote, signature, buyer);
     }
 
@@ -1923,7 +2308,7 @@ contract RevealReceiptStoreTest is Test {
         RevealReceiptStore.SignedReceiptQuote memory quote =
             _makeSignedReceiptQuote(listingId, buyer, bytes32(0), quotedAmount, uint64(block.timestamp + 1 days));
 
-        vm.expectRevert(RevealReceiptStore.InvalidParams.selector);
+        vm.expectRevert(RevealReceiptStore.InvalidPurchaseRef.selector);
         store.previewSignedReceiptPurchase(quote);
     }
 

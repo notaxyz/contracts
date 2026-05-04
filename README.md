@@ -19,7 +19,15 @@ v1 is Receipt Mode only.
 
 ## Product Model
 
-`RevealReceiptStore` is the only required v1 product contract.
+zkReveal v1 receipt mode has two immutable on-chain components:
+
+- `PurchaseRefRegistry` is the canonical replay-protection primitive. It consumes each
+  protocol-scoped `purchaseRef` once and stores which settlement contract consumed it.
+- `RevealReceiptStore` is the seller-facing receipt settlement contract. It manages listings,
+  signatures, payment settlement, and receipt records.
+
+Current and future zkReveal settlement contracts only share replay protection when they point to
+the same `PurchaseRefRegistry`.
 
 ## Purchase Modes
 
@@ -30,7 +38,7 @@ For production checkout/payment-link flows, prefer signed quotes.
 - Public fixed-price listing purchase.
 - Uses the listing's current `unitPrice` at execution time.
 - Does not bind the buyer before submission.
-- Anyone who submits a valid unused `purchaseRef` and pays first receives the receipt.
+- Anyone who submits a valid unconsumed `purchaseRef` and pays first receives the receipt.
 - Suitable for simple public listings where any buyer may purchase.
 - Not recommended for seller-issued private payment links, Telegram checkout links, order-specific checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
 
@@ -38,7 +46,7 @@ For production checkout/payment-link flows, prefer signed quotes.
 
 - Recommended default for production checkout/payment-link flows.
 - Uses a seller-authorized EIP-712 quote.
-- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, settlementToken, expiry, chain, and contract.
+- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, settlementToken, purchaseRefRegistry, expiry, chain, and contract.
 - Prevents another wallet from using the same seller-issued quote because `quote.buyer` must match `msg.sender`.
 - Supports dynamic pricing and optional integrator fees.
 - Use this for Telegram bot flows, seller-issued order links, private links, custom pricing, and partner or integrator checkouts.
@@ -50,10 +58,10 @@ Buyer Proof Mode fits inside the fixed-price path.
 1. Create a fixed-price listing with `createListing(listingHash, unitPrice)`.
 2. Optionally update the fixed listing price with `setListingPrice(listingId, newUnitPrice)`.
 3. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
-4. Agree on a `rawPurchaseRef` off-chain and derive the canonical seller-scoped `purchaseRef` with `hashPurchaseRef(seller, listingId, rawPurchaseRef)`, or compute the same hash off-chain.
+4. Agree on a `rawPurchaseRef` off-chain and derive the canonical protocol-scoped `purchaseRef` with `hashPurchaseRef(seller, listingId, rawPurchaseRef)`, or compute the same hash off-chain.
 5. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef)`.
 
-`purchaseReceipt` is the direct fixed-price purchase path. It uses the listing's current `unitPrice`, is public, and is not buyer-bound before submission. Anyone who submits a valid unused `purchaseRef` and pays first receives the receipt. It does not support integrator fees. The raw reference stays off-chain; only the derived `bytes32` hash is submitted. For production checkout/payment-link flows, prefer signed quotes.
+`purchaseReceipt` is the direct fixed-price purchase path. It uses the listing's current `unitPrice`, is public, and is not buyer-bound before submission. Anyone who submits a valid unconsumed `purchaseRef` and pays first receives the receipt. It does not support integrator fees. The raw reference stays off-chain; only the derived `bytes32` hash is submitted. For production checkout/payment-link flows, prefer signed quotes.
 
 `listingHash` is an opaque seller-defined metadata commitment. Human-readable product data lives off-chain, for example inside a seller-signed payment link or checkout payload.
 
@@ -61,9 +69,9 @@ Buyer Proof Mode fits inside the fixed-price path.
 
 Seller Payment Link Mode fits inside the signed quote path and is the recommended default for production checkout flows.
 
-1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the seller-scoped `purchaseRef` hash.
+1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the protocol-scoped `purchaseRef` hash.
 2. Seller optionally authorizes a backend or service key once with `setQuoteSigner(signer, true)`.
-3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`; the EIP-712 digest also binds the listing `seller` and v1 `settlementToken`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
 4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
 5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a seller-authorized quote signer at purchase time.
 6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
@@ -114,6 +122,7 @@ const types = {
     { name: "amount", type: "uint256" },
     { name: "metadataHash", type: "bytes32" },
     { name: "settlementToken", type: "address" },
+    { name: "purchaseRefRegistry", type: "address" },
     { name: "integratorFeeRecipient", type: "address" },
     { name: "integratorFeeAmount", type: "uint256" },
     { name: "expiresAt", type: "uint64" },
@@ -128,6 +137,7 @@ const message = {
   amount,
   metadataHash, // hash of seller-defined readable checkout metadata
   settlementToken,
+  purchaseRefRegistry,
   integratorFeeRecipient, // zero address when no integrator fee is used
   integratorFeeAmount, // zero when no integrator fee is used
   expiresAt,
@@ -141,7 +151,7 @@ The `seller` field in typed data is always the listing seller address, even when
 The signed EIP-712 type is:
 
 ```text
-SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)
+SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)
 ```
 
 ## Quote Signer Security
@@ -167,7 +177,7 @@ dashboard.
 
 - `listingHash` commits to seller-defined listing metadata without exposing human-readable product data.
 - `metadataHash` binds seller-defined payment-link or checkout metadata without revealing it on-chain.
-- `purchaseRef` is the seller-scoped on-chain hash of an off-chain raw operational order reference.
+- `purchaseRef` is the protocol-scoped on-chain hash of an off-chain raw operational order reference.
 
 ### Purchase References
 
@@ -176,33 +186,35 @@ on-chain receipt identifier.
 
 - `rawPurchaseRef` is generated by the seller, bot, frontend, or backend.
 - `rawPurchaseRef` stays off-chain.
-- `purchaseRef` is the seller-scoped `bytes32` hash submitted to the contract.
-- On-chain uniqueness and deterministic reconciliation are enforced per seller through
-  `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`, where `0` means unused.
-- The canonical hash is scoped by `zkRevealReceiptRef:v1`, `chainId`, the receipt store contract
-  address, the seller address, the listing ID, and the raw purchase reference.
+- `purchaseRef` is the protocol-scoped `bytes32` hash submitted to settlement contracts.
+- Canonical replay protection is enforced through `PurchaseRefRegistry.consume(purchaseRef)`.
+- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]` remains in `RevealReceiptStore` only as
+  a deterministic reconciliation helper for that store's own receipts.
+- The canonical hash is scoped by `zkReveal.purchaseRef.receipt.v1`, `chainId`, settlement token
+  address, seller address, and raw purchase reference.
 
 ```solidity
 purchaseRef = keccak256(abi.encode(
-    "zkRevealReceiptRef:v1",
+    "zkReveal.purchaseRef.receipt.v1",
     block.chainid,
-    address(receiptStore),
+    address(settlementToken),
     seller,
-    listingId,
     rawPurchaseRef
 ));
 ```
 
-Because the contract already scopes the hash by chain, contract, seller, and listing, the raw
+Because the canonical hash already scopes by chain, settlement token, and seller, the raw
 reference should stay short and operational. It should identify the seller-side order in an
 external system, not describe the buyer or purchased content.
 
-Because `listingId` is included in the canonical hash, the same raw reference used on different
-listings produces different `purchaseRef` hashes.
+`listingId` is used only to validate that the listing exists and belongs to the provided seller.
+It is not included in the final hash.
 
-Because on-chain uniqueness is enforced per seller on the final `purchaseRef` hash, sellers should
-still treat each `rawPurchaseRef` as a unique operational order ID and avoid reusing it across
-orders, even on different listings.
+Because replay protection is enforced on the final `purchaseRef` hash through a shared
+`PurchaseRefRegistry`, the same `purchaseRef` cannot be reused across current or future zkReveal
+settlement contracts that share that registry. This also prevents accidental replay across
+different listings for the same seller raw order reference. Sellers should still treat each
+`rawPurchaseRef` as a unique operational order ID and avoid reusing it across orders.
 
 Frontend and backend integrations should usually let the contract helper derive the canonical
 hash:
@@ -213,7 +225,7 @@ const purchaseRef = await receiptStore.hashPurchaseRef(seller, listingId, rawPur
 ```
 
 `rawPurchaseRef` must be non-empty, must stay off-chain, and must be at most 128 bytes.
-`purchaseRef` must remain unique per seller.
+`purchaseRef` must remain unique across any checkout flow that shares a `PurchaseRefRegistry`.
 
 Do not use emails, phone numbers, Telegram IDs, usernames, wallet labels, or predictable order
 numbers directly as `rawPurchaseRef`.
@@ -261,9 +273,13 @@ If seller systems also need product context, they should resolve it off-chain fr
 
 The contract also stores:
 
+- `PurchaseRefRegistry.consumptions[purchaseRef]` as the canonical replay-protection record
 - `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`
 - `receipts[receiptId]`
 - `listingCountBySeller[seller]` only to enforce `MAX_LISTINGS_PER_SELLER`
+
+`receiptIdBySellerAndPurchaseRef` is not the replay-protection source of truth. It is a local
+lookup helper for seller and indexer reconciliation after settlement.
 
 ## Fee Model
 
@@ -315,10 +331,14 @@ Integration guide:
 
 Core contract:
 
+- `src/PurchaseRefRegistry.sol`
 - `src/RevealReceiptStore.sol`
 
 Key functions:
 
+- `consume`
+- `isConsumed`
+- `consumedBy`
 - `createListing`
 - `setQuoteSigner`
 - `setListingActive`
@@ -358,7 +378,8 @@ forge test --offline --suppress-successful-traces
 
 ## Deployment
 
-The v1 deploy script deploys only `RevealReceiptStore`.
+The v1 deploy script deploys `PurchaseRefRegistry` first and then deploys `RevealReceiptStore`
+with that registry address wired into the constructor.
 
 Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
 `MIN_PURCHASE_AMOUNT = 1e6` and `MAX_PURCHASE_AMOUNT = 5_000e6` assume 6 decimals.
@@ -382,6 +403,14 @@ Optional envs:
 `FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`.
 If `PROTOCOL_FEE_BPS=0`, `FEE_RECIPIENT` may also be omitted and the deploy script will default it to the zero address.
 
+The deploy output logs both:
+
+- `PurchaseRefRegistry`
+- `ReceiptStore`
+
+If a future zkReveal settlement contract must share replay protection with an existing deployment,
+it should be deployed against the same `PurchaseRefRegistry` address.
+
 Typical flow:
 
 ```bash
@@ -396,16 +425,16 @@ export PROTOCOL_OWNER="0xYOUR_OWNER"
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
 ```
 
-Current Arbitrum Sepolia deployment as of 2026-05-04:
+After deployment, record:
 
-- chain ID: `421614`
-- contract: `0x4205B0b2c02e01771A7F7DE0A9Eb603DF96b273b`
-- deploy tx: `0x5f0eaeeb77ad6601f7588cb1372f11c7c0cf8f85f19d07e799f14df9c664a967`
-- block: `265392755`
-- settlement token: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
-- fee recipient: `0x756c9D74142f39D219f71A2518893583F4E182DD`
-- owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
-- protocol fee bps: `500`
+- chain ID
+- `PurchaseRefRegistry` address
+- `ReceiptStore` address
+- deploy transaction hash
+- settlement token
+- fee recipient
+- owner
+- protocol fee bps
 
 ## Roadmap
 

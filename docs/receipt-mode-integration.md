@@ -2,6 +2,17 @@
 
 For production checkout and payment-link flows, prefer signed quotes.
 
+## Architecture
+
+zkReveal receipt mode has two immutable contracts:
+
+- `PurchaseRefRegistry` is the canonical replay-protection layer. It consumes a `purchaseRef`
+  once globally for every settlement contract that shares the registry.
+- `RevealReceiptStore` handles listings, signatures, settlement, and receipt records.
+
+`receiptIdBySellerAndPurchaseRef[seller][purchaseRef]` inside `RevealReceiptStore` is only a local
+reconciliation helper. It is not the replay-protection source of truth.
+
 ## Purchase Modes
 
 ### Use `purchaseReceipt(listingId, purchaseRef)` only when:
@@ -14,7 +25,7 @@ For production checkout and payment-link flows, prefer signed quotes.
 - you do not need integrator fees
 
 This path is simple and public. It is not buyer-bound before submission. Anyone who submits a
-valid unused `purchaseRef` first and pays first receives the receipt.
+valid unconsumed `purchaseRef` first and pays first receives the receipt.
 
 Do not use this path for seller-issued private links, Telegram checkout links, order-specific
 checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
@@ -38,6 +49,7 @@ The EIP-712 quote binds:
 - purchase reference
 - metadata hash
 - settlement token
+- purchaseRefRegistry
 - expiry
 - chain
 - contract
@@ -65,21 +77,24 @@ dashboards.
 
 - `listingHash` commits to seller-defined listing metadata without exposing human-readable product data
 - `metadataHash` binds seller-defined payment-link or checkout metadata without revealing it on-chain
-- `purchaseRef` is the seller-scoped on-chain hash of an off-chain raw order reference
+- `purchaseRef` is the protocol-scoped on-chain hash of an off-chain raw order reference
 
 ### Purchase Reference Scoping
 
-- on-chain uniqueness and deterministic reconciliation are enforced through
-  `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`, where `0` means unused
+- canonical replay protection is enforced through `PurchaseRefRegistry.consume(purchaseRef)`
+- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]` remains only as a local receipt lookup
 - the canonical helper is `hashPurchaseRef(seller, listingId, rawPurchaseRef)`
-- the canonical hash includes the domain string, `block.chainid`, contract address, seller,
-  listing ID, and raw purchase reference
+- the canonical hash includes the domain string, `block.chainid`, settlement token address,
+  seller, and raw purchase reference
 
-Because `listingId` is included, reusing the same raw reference on two different listings
-produces two different `purchaseRef` hashes.
+`listingId` is used only to validate that the listing exists and belongs to the provided seller.
+It is not part of the final hash.
 
-Because uniqueness is enforced per seller on the final hash, sellers should still treat every raw
-reference as a unique operational order ID and avoid reusing it across orders.
+Because replay protection is enforced on the final hash through a shared `PurchaseRefRegistry`,
+the same `purchaseRef` cannot be reused across current or future zkReveal settlement contracts
+that share that registry. This also prevents accidental replay across different listings for the
+same seller raw order reference. Sellers should still treat every raw reference as a unique
+operational order ID and avoid reusing it across orders.
 
 Keep raw purchase references off-chain.
 
@@ -96,6 +111,14 @@ Prefer opaque references such as:
 
 - `ord_tg_20260502_f8K2pQ9z`
 - `550e8400-e29b-41d4-a716-446655440000`
+
+## Deployment Integration
+
+Deploy `PurchaseRefRegistry` before `RevealReceiptStore`.
+
+`RevealReceiptStore` constructor arguments now include the registry address. To preserve
+protocol-level replay protection across future settlement contracts, deploy those contracts
+against the same `PurchaseRefRegistry` address.
 
 ## Fulfillment Responsibility
 

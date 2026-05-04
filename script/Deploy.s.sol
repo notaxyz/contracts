@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
+import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
 import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
 
 contract Deploy is Script {
@@ -32,7 +33,9 @@ contract Deploy is Script {
         console2.log("ChainId:", block.chainid);
 
         vm.startBroadcast(pk);
-        RevealReceiptStore receiptStore = new RevealReceiptStore(settlementToken, feeRecipient, protocolFeeBps, owner);
+        PurchaseRefRegistry purchaseRefRegistry = new PurchaseRefRegistry();
+        RevealReceiptStore receiptStore =
+            new RevealReceiptStore(settlementToken, address(purchaseRefRegistry), feeRecipient, protocolFeeBps, owner);
         vm.stopBroadcast();
 
         console2.log("ChainId:", block.chainid);
@@ -41,6 +44,7 @@ contract Deploy is Script {
         console2.log("SettlementToken:", settlementToken);
         console2.log("FeeRecipient:", feeRecipient);
         console2.log("ProtocolFeeBps:", protocolFeeBps);
+        console2.log("PurchaseRefRegistry:", address(purchaseRefRegistry));
         console2.log("ReceiptStore:", address(receiptStore));
     }
 }

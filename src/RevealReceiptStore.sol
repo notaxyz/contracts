@@ -10,14 +10,16 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 import {FeeMath} from "./FeeMath.sol";
+import {PurchaseRefRegistry} from "./PurchaseRefRegistry.sol";
 
 /// @title RevealReceiptStore
 /// @notice Seller-first managed receipt contract for zkReveal Receipt Mode.
-/// @dev Sellers create listings with opaque metadata commitments, buyers pay with seller-scoped
+/// @dev Sellers create listings with opaque metadata commitments, buyers pay with protocol-scoped
 /// `purchaseRef` hashes derived from off-chain raw purchase references, and settlement completes
-/// immediately with an on-chain receipt record. Listing and receipt discovery is expected to be
-/// handled from events by indexers or seller systems, while the contract keeps deterministic
-/// purchase reconciliation on-chain.
+/// immediately with an on-chain receipt record. Replay protection is enforced canonically through
+/// a shared `PurchaseRefRegistry`, while this contract keeps deterministic seller-side purchase
+/// reconciliation on-chain. Listing and receipt discovery is expected to be handled from events by
+/// indexers or seller systems.
 contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
@@ -38,10 +40,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     uint64 public constant MAX_QUOTE_TTL = 24 hours;
     uint256 public constant MAX_LISTINGS_PER_SELLER = 50;
     uint256 public constant MAX_QUOTE_SIGNERS_PER_SELLER = 3;
-    string internal constant PURCHASE_REF_HASH_DOMAIN = "zkRevealReceiptRef:v1";
+    string internal constant PURCHASE_REF_HASH_DOMAIN = "zkReveal.purchaseRef.receipt.v1";
     uint256 internal constant MAX_RAW_PURCHASE_REF_LENGTH = 128;
     bytes32 public constant SIGNED_RECEIPT_QUOTE_TYPEHASH = keccak256(
-        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
+        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)"
     );
 
     // -------------------------------------------------------------------------
@@ -53,6 +55,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      `MIN_PURCHASE_AMOUNT` and `MAX_PURCHASE_AMOUNT` assume 6 decimals.
     ///      The constructor does not inspect token decimals.
     IERC20 public immutable settlementToken;
+    /// @notice Canonical protocol-level replay protection registry shared across settlement stores.
+    PurchaseRefRegistry public immutable purchaseRefRegistry;
     address public immutable feeRecipient;
     uint16 public immutable protocolFeeBps;
 
@@ -80,17 +84,19 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     /// @notice Seller-authorized EIP-712 quote for a buyer-bound receipt purchase.
     /// @dev The signed digest binds the listing seller, `listingId`, `buyer`, `purchaseRef`,
-    ///      `amount`, `metadataHash`, the v1 `settlementToken`, optional integrator fee fields,
-    ///      `expiresAt`, `block.chainid`, and `address(this)`. `buyer` must match `msg.sender`
-    ///      during `purchaseSignedReceipt`, so another wallet cannot consume the same quote. The
-    ///      quote may be signed by the seller directly or by a signer authorized with
-    ///      `setQuoteSigner`. Authorization is seller-wide in v1, so an authorized quote signer
-    ///      can sign quotes for any listing owned by that seller. `purchaseRef` is the
-    ///      seller-scoped on-chain hash of an off-chain raw purchase reference, `metadataHash`
-    ///      binds seller-defined off-chain checkout or payment-link metadata, and `amount` is
-    ///      denominated in settlement token base units. Integrator fee fields are optional, must
-    ///      be explicitly included in the seller-authorized quote, and are paid from the gross
-    ///      `amount`; the seller receives `amount - protocolFee - integratorFeeAmount`.
+    ///      `amount`, `metadataHash`, the v1 `settlementToken`, the immutable
+    ///      `purchaseRefRegistry`, optional integrator fee fields, `expiresAt`,
+    ///      `block.chainid`, and `address(this)`. `buyer` must match `msg.sender` during
+    ///      `purchaseSignedReceipt`, so another wallet cannot consume the same quote. The quote
+    ///      may be signed by the seller directly or by a signer authorized with `setQuoteSigner`.
+    ///      Authorization is seller-wide in v1, so an authorized quote signer can sign quotes for
+    ///      any listing owned by that seller. `purchaseRef` is a protocol-scoped hash of an
+    ///      off-chain raw purchase reference that is consumed through `PurchaseRefRegistry`,
+    ///      `metadataHash` binds seller-defined off-chain checkout or payment-link metadata, and
+    ///      `amount` is denominated in settlement token base units. Integrator fee fields are
+    ///      optional, must be explicitly included in the seller-authorized quote, and are paid
+    ///      from the gross `amount`; the seller receives
+    ///      `amount - protocolFee - integratorFeeAmount`.
     struct SignedReceiptQuote {
         uint256 listingId;
         address buyer;
@@ -142,9 +148,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @dev Number of currently authorized seller-wide quote signers for each seller.
     mapping(address seller => uint256 count) public authorizedQuoteSignerCount;
     /// @dev Deterministic seller-scoped reconciliation helper for `purchaseRef` hashes derived
-    ///      from off-chain `rawPurchaseRef` values. This is the on-chain replay protection source
-    ///      of truth and returns 0 if unused. Listing and receipt discovery is expected to be
-    ///      handled from events or indexers.
+    ///      from off-chain `rawPurchaseRef` values. Canonical replay protection lives in
+    ///      `purchaseRefRegistry`; this mapping is retained only for seller and indexer receipt
+    ///      lookup after settlement and returns 0 if no matching receipt has been recorded here.
     mapping(address => mapping(bytes32 => uint256)) public receiptIdBySellerAndPurchaseRef;
 
     bool public listingCreationPaused;
@@ -235,15 +241,20 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @dev Official v1 deployments are intended for 6-decimal settlement tokens such as USDC.
     ///      The constructor validates only address and fee bounds and does not inspect token
     ///      decimals.
-    constructor(address settlementToken_, address feeRecipient_, uint16 protocolFeeBps_, address owner_)
-        EIP712(EIP712_NAME, EIP712_VERSION)
-        Ownable(_validateOwner(owner_))
-    {
+    constructor(
+        address settlementToken_,
+        address purchaseRefRegistry_,
+        address feeRecipient_,
+        uint16 protocolFeeBps_,
+        address owner_
+    ) EIP712(EIP712_NAME, EIP712_VERSION) Ownable(_validateOwner(owner_)) {
         if (settlementToken_ == address(0)) revert InvalidParams();
+        if (purchaseRefRegistry_ == address(0)) revert InvalidParams();
         if (protocolFeeBps_ > MAX_PROTOCOL_FEE_BPS) revert InvalidParams();
         if (protocolFeeBps_ > 0 && feeRecipient_ == address(0)) revert InvalidParams();
 
         settlementToken = IERC20(settlementToken_);
+        purchaseRefRegistry = PurchaseRefRegistry(purchaseRefRegistry_);
         feeRecipient = feeRecipient_;
         protocolFeeBps = protocolFeeBps_;
     }
@@ -268,6 +279,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         if (rawPurchaseRefLength == 0 || rawPurchaseRefLength > MAX_RAW_PURCHASE_REF_LENGTH) {
             revert InvalidPurchaseRef();
         }
+    }
+
+    function _validatePurchaseRef(bytes32 purchaseRef) internal pure {
+        if (purchaseRef == bytes32(0)) revert InvalidPurchaseRef();
     }
 
     function _quoteProtocolFee(uint256 grossAmount) internal view returns (uint256) {
@@ -343,6 +358,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
                     quote.amount,
                     quote.metadataHash,
                     address(settlementToken),
+                    address(purchaseRefRegistry),
                     quote.integratorFeeRecipient,
                     quote.integratorFeeAmount,
                     quote.expiresAt
@@ -372,13 +388,13 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
         if (!listing.active) revert ListingInactive();
         if (quote.buyer != expectedBuyer) revert QuoteBuyerMismatch();
-        if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
+        _validatePurchaseRef(quote.purchaseRef);
         if (quote.metadataHash == bytes32(0)) revert InvalidParams();
         _validatePurchaseAmount(quote.amount);
         _validateIntegratorFee(quote.integratorFeeRecipient, quote.integratorFeeAmount, quote.amount);
         if (quote.expiresAt <= block.timestamp) revert QuoteExpired();
         if (quote.expiresAt > block.timestamp + MAX_QUOTE_TTL) revert QuoteExpiryTooLong();
-        if (receiptIdBySellerAndPurchaseRef[listing.seller][quote.purchaseRef] != 0) {
+        if (purchaseRefRegistry.isConsumed(quote.purchaseRef)) {
             revert PurchaseRefAlreadyUsed();
         }
 
@@ -432,6 +448,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ) internal returns (uint256 receiptId) {
         RakeQuote memory rake = _quoteRake(amount, integratorFeeRecipient, integratorFeeAmount);
 
+        purchaseRefRegistry.consume(purchaseRef);
         settlementToken.safeTransferFrom(payer, address(this), amount);
 
         receiptId = nextReceiptId++;
@@ -557,19 +574,20 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // Purchase Functions
     // -------------------------------------------------------------------------
 
-    /// @notice Purchase a public fixed-price Receipt Mode listing using a seller-scoped `purchaseRef` hash.
+    /// @notice Purchase a public fixed-price Receipt Mode listing using a protocol-scoped `purchaseRef` hash.
     /// @dev This is the simple public purchase path. It uses the listing's current `unitPrice`,
     ///      is not buyer-bound before submission, and records `msg.sender` as the buyer. Any
-    ///      wallet that submits a valid unused `purchaseRef` first and pays first receives the
+    ///      wallet that submits a valid unconsumed `purchaseRef` first and pays first receives the
     ///      receipt. `purchaseRef` should normally be the output of
     ///      `hashPurchaseRef(seller, listingId, rawPurchaseRef)`, where `rawPurchaseRef` remains
     ///      off-chain in the seller, bot, or backend system. That readable raw reference can later
     ///      be revealed or reused for support, reconciliation, buyer proof, or seller accounting.
-    ///      `purchaseRef` must remain unique per seller. Use `purchaseSignedReceipt` instead for
-    ///      buyer-bound payment links, private checkout flows, dynamic pricing, or integrator fees.
-    ///      Payment settles immediately and fulfillment remains entirely off-chain in seller
-    ///      systems. Receipt discovery is expected to be handled from `ReceiptPurchased` events or
-    ///      indexers.
+    ///      `purchaseRef` is a protocol-scoped hash consumed through `PurchaseRefRegistry`,
+    ///      preventing replay across current and future zkReveal settlement contracts that share
+    ///      the registry. Use `purchaseSignedReceipt` instead for buyer-bound payment links,
+    ///      private checkout flows, dynamic pricing, or integrator fees. Payment settles
+    ///      immediately and fulfillment remains entirely off-chain in seller systems. Receipt
+    ///      discovery is expected to be handled from `ReceiptPurchased` events or indexers.
     function purchaseReceipt(uint256 listingId, bytes32 purchaseRef)
         external
         nonReentrant
@@ -580,8 +598,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         Listing storage listing = listings[listingId];
 
         if (!listing.active) revert ListingInactive();
-        if (purchaseRef == bytes32(0)) revert InvalidParams();
-        if (receiptIdBySellerAndPurchaseRef[listing.seller][purchaseRef] != 0) {
+        _validatePurchaseRef(purchaseRef);
+        if (purchaseRefRegistry.isConsumed(purchaseRef)) {
             revert PurchaseRefAlreadyUsed();
         }
 
@@ -593,11 +611,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Purchase a Receipt Mode listing using a seller-authorized EIP-712 quote.
     /// @dev This is the recommended v1 flow for production checkout and payment-link integrations.
     ///      Seller Payment Link Mode uses a quote signed by the listing seller or an authorized
-    ///      seller-wide quote signer, with `quote.purchaseRef` carrying the seller-scoped hash
+    ///      seller-wide quote signer, with `quote.purchaseRef` carrying the protocol-scoped hash
     ///      derived from an off-chain `rawPurchaseRef`. The signed quote binds the buyer, seller,
-    ///      listing, `purchaseRef`, amount, metadata, settlement token, expiry, chain, and
-    ///      contract. The signed amount overrides the current listing unit price and settles
-    ///      immediately on success.
+    ///      listing, `purchaseRef`, amount, metadata, settlement token, `purchaseRefRegistry`,
+    ///      expiry, chain, and contract. The signed amount overrides the current listing unit
+    ///      price and settles immediately on success. The shared `PurchaseRefRegistry` is the
+    ///      canonical replay protection layer across settlement contracts.
     ///      Quotes are valid only while `block.timestamp < quote.expiresAt`, and `quote.buyer`
     ///      must match `msg.sender`. The recovered signer must be the listing seller or a signer
     ///      authorized by the seller for any listing that seller owns. The signed quote may also
@@ -630,14 +649,16 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     /// @notice Return the canonical on-chain `purchaseRef` hash for an off-chain `rawPurchaseRef`.
     /// @dev `rawPurchaseRef` should be a short seller-side order reference such as
-    ///      `ord_tg_20260502_f8K2pQ9z`. The hash is scoped by the `zkRevealReceiptRef:v1` domain,
-    ///      `block.chainid`, `address(this)`, `seller`, `listingId`, and `rawPurchaseRef`, so
-    ///      `rawPurchaseRef` does not need to include seller, listing, chain, contract, or domain
-    ///      data itself. Including `listingId` means the same raw reference used on different
-    ///      listings produces different hashes, but replay protection is still enforced per seller
-    ///      on the final `purchaseRef` value. Only the resulting `bytes32 purchaseRef` is
-    ///      submitted or stored on-chain. The seller must match the listing owner, and
-    ///      `rawPurchaseRef` must be non-empty and at most 128 bytes.
+    ///      `ord_tg_20260502_f8K2pQ9z`. The hash is scoped by the
+    ///      `zkReveal.purchaseRef.receipt.v1` domain, `block.chainid`, the settlement token,
+    ///      `seller`, and `rawPurchaseRef`, so `rawPurchaseRef` does not need to include seller,
+    ///      chain, token, or domain data itself. `listingId` is used only to validate that the
+    ///      listing exists and belongs to `seller`; it is not included in the final hash. The
+    ///      resulting `purchaseRef` is independent of receipt store address and listing ID, is
+    ///      consumed through `PurchaseRefRegistry`, and prevents accidental replay across listings
+    ///      and future settlement contracts that share the registry. Only the resulting
+    ///      `bytes32 purchaseRef` is submitted or stored on-chain. `rawPurchaseRef` must be
+    ///      non-empty and at most 128 bytes.
     function hashPurchaseRef(address seller, uint256 listingId, string calldata rawPurchaseRef)
         external
         view
@@ -649,7 +670,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         _validateRawPurchaseRef(rawPurchaseRef);
 
         return keccak256(
-            abi.encode(PURCHASE_REF_HASH_DOMAIN, block.chainid, address(this), seller, listingId, rawPurchaseRef)
+            abi.encode(PURCHASE_REF_HASH_DOMAIN, block.chainid, address(settlementToken), seller, rawPurchaseRef)
         );
     }
 
@@ -669,8 +690,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     }
 
     /// @notice Returns the EIP-712 digest for a seller-authorized signed receipt quote.
-    /// @dev The digest includes the derived seller, settlement token, current chain ID, and this contract address.
-    ///      It may be signed by the listing seller or by a seller-wide quote signer authorized by that seller.
+    /// @dev The digest includes the derived seller, settlement token, immutable
+    ///      `purchaseRefRegistry`, current chain ID, and this contract address. It may be signed
+    ///      by the listing seller or by a seller-wide quote signer authorized by that seller.
     function hashSignedReceiptQuote(SignedReceiptQuote calldata quote)
         public
         view
@@ -705,7 +727,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         )
     {
         Listing storage listing = listings[quote.listingId];
-        if (quote.purchaseRef == bytes32(0)) revert InvalidParams();
+        _validatePurchaseRef(quote.purchaseRef);
         if (quote.metadataHash == bytes32(0)) revert InvalidParams();
         RakeQuote memory rake = _quoteRake(quote.amount, quote.integratorFeeRecipient, quote.integratorFeeAmount);
 
@@ -759,10 +781,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         return receipts[receiptId];
     }
 
-    /// @notice Return the receipt ID for a seller-scoped `purchaseRef`, or 0 if unused.
+    /// @notice Return the locally recorded receipt ID for a seller-scoped lookup key, or 0 if absent.
     /// @dev Sellers, bots, and indexers can recompute the canonical hash from a revealed
     ///      `rawPurchaseRef` via `hashPurchaseRef` and use this getter as a deterministic on-chain
-    ///      reconciliation helper for the matching receipt.
+    ///      reconciliation helper for the matching receipt recorded by this store.
     function getReceiptIdBySellerAndPurchaseRef(address seller, bytes32 purchaseRef) external view returns (uint256) {
         return receiptIdBySellerAndPurchaseRef[seller][purchaseRef];
     }
