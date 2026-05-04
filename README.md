@@ -6,7 +6,7 @@ Buyer pays.
 Seller gets paid.  
 Your backend receives a verifiable on-chain purchase receipt.
 
-Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately and emits a `ReceiptPurchased` event that seller bots, APIs, dashboards, or indexers can use to fulfill orders off-chain.
+Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchased`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
 v1 is Receipt Mode only.
 
@@ -21,6 +21,28 @@ v1 is Receipt Mode only.
 
 `RevealReceiptStore` is the only required v1 product contract.
 
+## Purchase Modes
+
+For production checkout/payment-link flows, prefer signed quotes.
+
+### `purchaseReceipt(listingId, purchaseRef)`
+
+- Public fixed-price listing purchase.
+- Uses the listing's current `unitPrice` at execution time.
+- Does not bind the buyer before submission.
+- Anyone who submits a valid unused `purchaseRef` and pays first receives the receipt.
+- Suitable for simple public listings where any buyer may purchase.
+- Not recommended for seller-issued private payment links, Telegram checkout links, order-specific checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
+
+### `purchaseSignedReceipt(quote, sellerSignature)`
+
+- Recommended default for production checkout/payment-link flows.
+- Uses a seller-authorized EIP-712 quote.
+- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, settlementToken, expiry, chain, and contract.
+- Prevents another wallet from using the same seller-issued quote because `quote.buyer` must match `msg.sender`.
+- Supports dynamic pricing and optional integrator fees.
+- Use this for Telegram bot flows, seller-issued order links, private links, custom pricing, and partner or integrator checkouts.
+
 ### Fixed-price receipt flow
 
 Buyer Proof Mode fits inside the fixed-price path.
@@ -31,23 +53,27 @@ Buyer Proof Mode fits inside the fixed-price path.
 4. Agree on a `rawPurchaseRef` off-chain and derive the canonical seller-scoped `purchaseRef` with `hashPurchaseRef(seller, listingId, rawPurchaseRef)`, or compute the same hash off-chain.
 5. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef)`.
 
-`purchaseReceipt` is the direct fixed-price purchase path. It does not support integrator fees. The raw reference stays off-chain; only the derived `bytes32` hash is submitted.
+`purchaseReceipt` is the direct fixed-price purchase path. It uses the listing's current `unitPrice`, is public, and is not buyer-bound before submission. Anyone who submits a valid unused `purchaseRef` and pays first receives the receipt. It does not support integrator fees. The raw reference stays off-chain; only the derived `bytes32` hash is submitted. For production checkout/payment-link flows, prefer signed quotes.
 
 `listingHash` is an opaque seller-defined metadata commitment. Human-readable product data lives off-chain, for example inside a seller-signed payment link or checkout payload.
 
 ### Signed quote receipt flow
 
-Seller Payment Link Mode fits inside the signed quote path.
+Seller Payment Link Mode fits inside the signed quote path and is the recommended default for production checkout flows.
 
 1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the seller-scoped `purchaseRef` hash.
 2. Seller optionally authorizes a backend or service key once with `setQuoteSigner(signer, true)`.
-3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` with `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, `settlementToken`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, and `expiresAt`; the EIP-712 digest also binds the listing `seller` and v1 `settlementToken`.
 4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
 5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a seller-authorized quote signer at purchase time.
 6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
 
 Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery.
 `metadataHash` must be non-zero and should commit to the readable off-chain payment-link or checkout metadata the seller intends to authorize.
+
+Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer)` when a frontend, bot, or backend wants the same validation path as `purchaseSignedReceipt` without moving funds or creating a receipt.
+
+Use `previewSignedReceiptPurchase(quote)` only for fee math. It does not verify the seller signature, buyer match, expiry, listing active status, or replay state.
 
 Dynamic signed quotes may be signed either by the seller wallet directly or by an authorized quote signer. This lets a seller keep the settlement wallet separate from a backend hot key. The seller authorizes a signer once with `setQuoteSigner`, and that signer can create dynamic quotes for the seller's listings.
 
@@ -118,22 +144,42 @@ The signed EIP-712 type is:
 SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 expiresAt)
 ```
 
-## Listing Metadata
+## Quote Signer Security
 
-`listingHash` is a seller-scoped `bytes32` metadata commitment stored on-chain with the listing.
+`setQuoteSigner(signer, true)` authorizes `signer` at seller scope.
 
-Do not put readable product names, SKUs, URLs, usernames, emails, or other business-sensitive metadata directly on-chain. Keep human-readable product details off-chain and bind them to `listingHash` in your own systems or in a seller-signed payment link.
+- A seller-authorized quote signer can sign dynamic quotes for any listing owned by that seller.
+- Treat quote signers as hot operational keys.
+- Use a dedicated backend signer instead of the seller treasury key as a hot service key.
+- Rotate or revoke signers when team members, servers, or environments change.
+- Monitor signed quote generation in backend logs.
+- If a signer is compromised, revoke it immediately with `setQuoteSigner(signer, false)`.
+- Future versions may support per-listing signer scope, but v1 signer scope is seller-wide.
 
-## Purchase References
+## Hashes, Metadata, and Privacy
+
+`listingHash`, `purchaseRef`, and `metadataHash` are opaque commitments and identifiers. They are
+not encryption. If the underlying raw value is weak, predictable, or guessable, it may still be
+guessed off-chain.
+
+Keep human-readable product, order, and customer data off-chain in the seller backend, bot, or
+dashboard.
+
+- `listingHash` commits to seller-defined listing metadata without exposing human-readable product data.
+- `metadataHash` binds seller-defined payment-link or checkout metadata without revealing it on-chain.
+- `purchaseRef` is the seller-scoped on-chain hash of an off-chain raw operational order reference.
+
+### Purchase References
 
 In Receipt Mode, zkReveal separates the human-readable off-chain order reference from the
 on-chain receipt identifier.
 
 - `rawPurchaseRef` is generated by the seller, bot, frontend, or backend.
 - `rawPurchaseRef` stays off-chain.
-- `purchaseRef` is the `bytes32` hash submitted to the contract.
-- The hash is scoped by `zkRevealReceiptRef:v1`, `chainId`, the receipt store contract address,
-  the seller address, the listing ID, and the raw purchase reference.
+- `purchaseRef` is the seller-scoped `bytes32` hash submitted to the contract.
+- On-chain uniqueness is enforced per seller as `purchaseRefUsed[seller][purchaseRef]`.
+- The canonical hash is scoped by `zkRevealReceiptRef:v1`, `chainId`, the receipt store contract
+  address, the seller address, the listing ID, and the raw purchase reference.
 
 ```solidity
 purchaseRef = keccak256(abi.encode(
@@ -150,17 +196,12 @@ Because the contract already scopes the hash by chain, contract, seller, and lis
 reference should stay short and operational. It should identify the seller-side order in an
 external system, not describe the buyer or purchased content.
 
-Canonical v1 `rawPurchaseRef` format:
+Because `listingId` is included in the canonical hash, the same raw reference used on different
+listings produces different `purchaseRef` hashes.
 
-```text
-ord_<channel>_<yyyymmdd>_<unique-id>
-```
-
-Examples:
-
-- `ord_tg_20260502_f8K2pQ9z`
-- `ord_web_20260502_000001`
-- `ord_api_20260502_sellerOrder3921`
+Because on-chain uniqueness is enforced per seller on the final `purchaseRef` hash, sellers should
+still treat each `rawPurchaseRef` as a unique operational order ID and avoid reusing it across
+orders, even on different listings.
 
 Frontend and backend integrations should usually let the contract helper derive the canonical
 hash:
@@ -173,13 +214,40 @@ const purchaseRef = await receiptStore.hashPurchaseRef(seller, listingId, rawPur
 `rawPurchaseRef` must be non-empty, must stay off-chain, and must be at most 128 bytes.
 `purchaseRef` must remain unique per seller.
 
+Do not use emails, phone numbers, Telegram IDs, usernames, wallet labels, or predictable order
+numbers directly as `rawPurchaseRef`.
+
+Prefer random or opaque references such as:
+
+- `ord_tg_20260502_f8K2pQ9z`
+- `550e8400-e29b-41d4-a716-446655440000`
+
 Do not put sensitive buyer data, emails, Telegram usernames, private channel names, or plaintext
 secrets inside `rawPurchaseRef`.
+
+Hashes are commitments and identifiers, not encryption. Weak or guessable raw references may still
+be vulnerable to guessing.
+
+## Fulfillment Responsibility
+
+Receipt Mode is a proof-of-payment and settlement primitive. It is not an escrow or
+delivery-verification system.
+
+- Settlement is immediate.
+- The contract does not verify delivery, content correctness, access provisioning, product
+  quality, refunds, disputes, or whether the seller actually fulfilled the order.
+- Seller systems, bots, dashboards, or other off-chain workflows are responsible for fulfillment
+  after they detect a valid receipt.
+- Buyers and integrators should use trusted sellers or add their own refund or dispute layer
+  off-chain.
+- This is intentionally different from the older escrow or delivery mode designs.
 
 ## Source of Truth
 
 The `ReceiptPurchased` event is the source of truth for seller bots, backends, dashboards, and indexers.
 Signed quote purchases emit the signed `metadataHash`; direct fixed-price purchases emit `bytes32(0)`.
+`SellerPaid` records the seller net amount after protocol and integrator fees. `ProtocolFeePaid`
+and `IntegratorFeePaid` expose the rest of the payout breakdown.
 
 Backends can reconcile purchases by:
 
@@ -211,6 +279,10 @@ Constraints:
 - `feeRecipient` must be non-zero when `protocolFeeBps > 0`
 - `integratorFeeRecipient` must be the zero address when `integratorFeeAmount = 0`
 - `integratorFeeRecipient` must be non-zero when `integratorFeeAmount > 0`
+- official v1 deployments are intended for a 6-decimal settlement token such as USDC
+- `MIN_PURCHASE_AMOUNT = 1e6` and `MAX_PURCHASE_AMOUNT = 5_000e6` assume 6 decimals
+- deploying with an 18-decimal token changes the practical meaning of those caps and is not recommended unless constants are adjusted in a future version
+- for Arbitrum mainnet, use the canonical or native USDC deployment intended by the project
 - `settlementToken` should be a standard ERC-20 such as USDC
 - fee-on-transfer and rebasing tokens are not supported
 
@@ -228,11 +300,15 @@ The owner can independently pause:
 
 v1 also enforces conservative hard caps:
 
-- min purchase: 1 USDC (`1e6`)
-- max purchase: 5,000 USDC (`5_000e6`)
+- min purchase: 1 USDC (`1e6`) assuming a 6-decimal settlement token
+- max purchase: 5,000 USDC (`5_000e6`) assuming a 6-decimal settlement token
 - max quote TTL: 24 hours
 - max listings per seller: 50
 - max quote signers per seller: 3
+
+Integration guide:
+
+- [`docs/receipt-mode-integration.md`](docs/receipt-mode-integration.md)
 
 ## Contract Surface
 
@@ -251,6 +327,7 @@ Key functions:
 - `purchaseSignedReceipt`
 - `quotePurchaseReceipt`
 - `previewSignedReceiptPurchase`
+- `validateSignedReceiptPurchase`
 - `hashSignedReceiptQuote`
 - `getReceiptIdBySellerAndPurchaseRef`
 
@@ -261,6 +338,7 @@ Key events:
 - `ListingPriceChanged`
 - `QuoteSignerAuthorizationChanged`
 - `ReceiptPurchased`
+- `SellerPaid`
 - `ProtocolFeePaid`
 - `IntegratorFeePaid`
 
@@ -280,6 +358,13 @@ forge test --offline --suppress-successful-traces
 ## Deployment
 
 The v1 deploy script deploys only `RevealReceiptStore`.
+
+Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
+`MIN_PURCHASE_AMOUNT = 1e6` and `MAX_PURCHASE_AMOUNT = 5_000e6` assume 6 decimals.
+Deploying with an 18-decimal token changes the practical meaning of those caps and is not
+recommended unless a future version adjusts the constants.
+
+For Arbitrum mainnet, use the canonical/native USDC deployment intended by the project.
 
 Required envs:
 
