@@ -95,12 +95,13 @@ contract RevealReceiptStoreTest is Test {
 
     function setUp() public {
         usdc = new ReceiptMockUSDC();
-        registry = new PurchaseRefRegistry();
+        registry = new PurchaseRefRegistry(address(this));
         seller = vm.addr(SELLER_PK);
         seller2 = vm.addr(SELLER2_PK);
         quoteSigner = vm.addr(QUOTE_SIGNER_PK);
         attacker = vm.addr(ATTACKER_PK);
         store = new RevealReceiptStore(address(usdc), address(registry), feeRecipient, 0, address(this));
+        registry.setConsumerAuthorization(address(store), true);
 
         usdc.mint(buyer, 10_000_000_000);
         usdc.mint(buyer2, 10_000_000_000);
@@ -111,6 +112,10 @@ contract RevealReceiptStoreTest is Test {
         vm.deal(buyer, 10 ether);
         vm.deal(buyer2, 10 ether);
         vm.deal(attacker, 10 ether);
+    }
+
+    function _authorizeRegistryConsumer(PurchaseRefRegistry targetRegistry, address consumer) internal {
+        targetRegistry.setConsumerAuthorization(consumer, true);
     }
 
     function _deployStore(uint16 feeBps) internal returns (RevealReceiptStore deployedStore) {
@@ -126,6 +131,7 @@ contract RevealReceiptStoreTest is Test {
         returns (RevealReceiptStore deployedStore)
     {
         deployedStore = new RevealReceiptStore(address(usdc), address(targetRegistry), feeRecipient, feeBps, owner_);
+        _authorizeRegistryConsumer(targetRegistry, address(deployedStore));
     }
 
     function _deployHarnessStore(uint16 feeBps) internal returns (RevealReceiptStoreHarness deployedStore) {
@@ -145,6 +151,7 @@ contract RevealReceiptStoreTest is Test {
     {
         deployedStore =
             new RevealReceiptStoreHarness(address(usdc), address(targetRegistry), feeRecipient, feeBps, owner_);
+        _authorizeRegistryConsumer(targetRegistry, address(deployedStore));
     }
 
     function _createListingAs(address sellerAccount, bytes32 sellerListingHash) internal returns (uint256 listingId) {
@@ -355,6 +362,7 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function test_PurchaseRefRegistry_ConsumesPurchaseRefOnce() public {
+        _authorizeRegistryConsumer(registry, address(this));
         registry.consume(purchaseRef);
 
         _assertRegistryConsumption(purchaseRef, address(this));
@@ -366,6 +374,7 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function test_PurchaseRefRegistry_RejectsZeroPurchaseRef() public {
+        _authorizeRegistryConsumer(registry, address(this));
         vm.expectRevert(PurchaseRefRegistry.InvalidPurchaseRef.selector);
         registry.consume(bytes32(0));
     }
@@ -381,6 +390,7 @@ contract RevealReceiptStoreTest is Test {
 
     function test_PurchaseRefRegistry_ConsumeEmitsEvent() public {
         uint64 expectedConsumedAt = uint64(block.timestamp);
+        _authorizeRegistryConsumer(registry, buyer);
 
         vm.expectEmit(true, true, false, true);
         emit PurchaseRefRegistry.PurchaseRefConsumed(purchaseRef, buyer, expectedConsumedAt);
@@ -392,6 +402,8 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function test_PurchaseRefRegistry_DifferentCallersCannotConsumeSameRef() public {
+        _authorizeRegistryConsumer(registry, buyer);
+        _authorizeRegistryConsumer(registry, buyer2);
         vm.prank(buyer);
         registry.consume(purchaseRef);
 
@@ -403,6 +415,7 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function test_PurchaseRefRegistry_DifferentRefsCanBeConsumedBySameCaller() public {
+        _authorizeRegistryConsumer(registry, buyer);
         vm.startPrank(buyer);
         registry.consume(purchaseRef);
         registry.consume(purchaseRef2);
@@ -415,6 +428,7 @@ contract RevealReceiptStoreTest is Test {
     function test_PurchaseRefRegistry_ConsumedAtUsesBlockTimestamp() public {
         uint64 expectedConsumedAt = 1_717_171_717;
         vm.warp(expectedConsumedAt);
+        _authorizeRegistryConsumer(registry, buyer);
 
         vm.prank(buyer);
         registry.consume(purchaseRef);
@@ -1143,6 +1157,7 @@ contract RevealReceiptStoreTest is Test {
     function test_RegistryCanBlockPurchaseEvenWhenLocalMappingEmpty() public {
         uint256 listingId = _createListingAsSeller();
         address externalConsumer = address(0xBAD);
+        _authorizeRegistryConsumer(registry, externalConsumer);
 
         vm.prank(externalConsumer);
         registry.consume(purchaseRef);
@@ -1162,6 +1177,21 @@ contract RevealReceiptStoreTest is Test {
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.ListingNotFound.selector);
         store.purchaseReceipt(999, purchaseRef);
+        vm.stopPrank();
+    }
+
+    function test_PurchaseReceipt_RevertsWhenStoreNotAuthorizedInRegistry() public {
+        PurchaseRefRegistry unauthorizedRegistry = new PurchaseRefRegistry(address(this));
+        RevealReceiptStore unauthorizedStore =
+            new RevealReceiptStore(address(usdc), address(unauthorizedRegistry), feeRecipient, 0, address(this));
+        uint256 listingId = _createListingAs(unauthorizedStore, seller, listingHash);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(unauthorizedStore), unitPrice);
+        vm.expectRevert(
+            abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, address(unauthorizedStore))
+        );
+        unauthorizedStore.purchaseReceipt(listingId, purchaseRef);
         vm.stopPrank();
     }
 
@@ -1203,6 +1233,24 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee));
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
         assertEq(usdc.balanceOf(address(feeStore)), 0);
+    }
+
+    function test_PurchaseSignedReceipt_RevertsWhenStoreNotAuthorizedInRegistry() public {
+        PurchaseRefRegistry unauthorizedRegistry = new PurchaseRefRegistry(address(this));
+        RevealReceiptStore unauthorizedStore =
+            new RevealReceiptStore(address(usdc), address(unauthorizedRegistry), feeRecipient, 0, address(this));
+        uint256 listingId = _createListingAs(unauthorizedStore, seller, listingHash);
+        RevealReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(unauthorizedStore, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(unauthorizedStore), quotedAmount);
+        vm.expectRevert(
+            abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, address(unauthorizedStore))
+        );
+        unauthorizedStore.purchaseSignedReceipt(quote, signature);
+        vm.stopPrank();
     }
 
     function test_PurchaseSignedReceipt_DirectSellerSignatureStillWorks() public {
@@ -1855,7 +1903,7 @@ contract RevealReceiptStoreTest is Test {
     }
 
     function test_HashSignedReceiptQuote_DependsOnPurchaseRefRegistry() public {
-        PurchaseRefRegistry secondRegistry = new PurchaseRefRegistry();
+        PurchaseRefRegistry secondRegistry = new PurchaseRefRegistry(address(this));
         RevealReceiptStore secondStoreWithDifferentRegistry = _deployStore(0, address(this), secondRegistry);
         uint256 listingId1 = _createListingAs(store, seller, listingHash);
         uint256 listingId2 = _createListingAs(secondStoreWithDifferentRegistry, seller, listingHash);
@@ -2125,6 +2173,7 @@ contract RevealReceiptStoreTest is Test {
             _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 hours));
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
         address externalConsumer = address(0xBAD);
+        _authorizeRegistryConsumer(registry, externalConsumer);
 
         vm.prank(externalConsumer);
         registry.consume(purchaseRef);

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
@@ -15,7 +16,7 @@ contract PurchaseRefRegistryTest is Test {
     bytes32 purchaseRef2 = keccak256("purchase-2");
 
     function setUp() public {
-        registry = new PurchaseRefRegistry();
+        registry = new PurchaseRefRegistry(address(this));
     }
 
     function _assertConsumed(bytes32 ref, address expectedConsumer, uint64 expectedConsumedAt) internal view {
@@ -34,13 +35,77 @@ contract PurchaseRefRegistryTest is Test {
         assertEq(consumedAt, 0);
     }
 
+    function _authorize(address consumer) internal {
+        registry.setConsumerAuthorization(consumer, true);
+    }
+
+    function test_Constructor_SetsOwner() public {
+        PurchaseRefRegistry deployedRegistry = new PurchaseRefRegistry(consumerA);
+
+        assertEq(deployedRegistry.owner(), consumerA);
+    }
+
+    function test_Constructor_ZeroOwnerReverts() public {
+        vm.expectRevert(PurchaseRefRegistry.InvalidOwner.selector);
+        new PurchaseRefRegistry(address(0));
+    }
+
     function test_InitialState_ReturnsEmptyConsumption() public view {
         _assertNotConsumed(purchaseRef1);
+    }
+
+    function test_SetConsumerAuthorization_OwnerCanAuthorizeAndRevoke() public {
+        registry.setConsumerAuthorization(consumerA, true);
+        assertTrue(registry.authorizedConsumers(consumerA));
+
+        registry.setConsumerAuthorization(consumerA, false);
+        assertFalse(registry.authorizedConsumers(consumerA));
+    }
+
+    function test_SetConsumerAuthorization_RevokeBlocksFutureConsumesButDoesNotUnconsumeHistory() public {
+        _authorize(consumerA);
+
+        vm.prank(consumerA);
+        registry.consume(purchaseRef1);
+
+        registry.setConsumerAuthorization(consumerA, false);
+
+        _assertConsumed(purchaseRef1, consumerA, uint64(block.timestamp));
+        assertFalse(registry.authorizedConsumers(consumerA));
+
+        vm.prank(consumerA);
+        vm.expectRevert(abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, consumerA));
+        registry.consume(purchaseRef2);
+    }
+
+    function test_SetConsumerAuthorization_NonOwnerReverts() public {
+        vm.prank(consumerA);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, consumerA));
+        registry.setConsumerAuthorization(consumerA, true);
+    }
+
+    function test_SetConsumerAuthorization_RejectsZeroConsumer() public {
+        vm.expectRevert(PurchaseRefRegistry.InvalidConsumer.selector);
+        registry.setConsumerAuthorization(address(0), true);
+    }
+
+    function test_SetConsumerAuthorization_EmitsEvent() public {
+        vm.expectEmit(true, false, false, true, address(registry));
+        emit PurchaseRefRegistry.ConsumerAuthorizationChanged(consumerA, true);
+
+        registry.setConsumerAuthorization(consumerA, true);
+    }
+
+    function test_Consume_RevertsForUnauthorizedConsumer() public {
+        vm.prank(consumerA);
+        vm.expectRevert(abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, consumerA));
+        registry.consume(purchaseRef1);
     }
 
     function test_Consume_StoresCallerAndTimestamp() public {
         uint64 expectedConsumedAt = 1_700_000_000;
         vm.warp(expectedConsumedAt);
+        _authorize(consumerA);
 
         vm.prank(consumerA);
         registry.consume(purchaseRef1);
@@ -51,6 +116,7 @@ contract PurchaseRefRegistryTest is Test {
     function test_Consume_EmitsPurchaseRefConsumed() public {
         uint64 expectedConsumedAt = 1_700_000_000;
         vm.warp(expectedConsumedAt);
+        _authorize(consumerA);
 
         vm.expectEmit(true, true, false, true, address(registry));
         emit PurchaseRefRegistry.PurchaseRefConsumed(purchaseRef1, consumerA, expectedConsumedAt);
@@ -60,11 +126,19 @@ contract PurchaseRefRegistryTest is Test {
     }
 
     function test_Consume_RejectsZeroPurchaseRef() public {
+        _authorize(address(this));
         vm.expectRevert(PurchaseRefRegistry.InvalidPurchaseRef.selector);
         registry.consume(bytes32(0));
     }
 
+    function test_Consume_ZeroPurchaseRefUnauthorizedCallerRevertsUnauthorizedFirst() public {
+        vm.prank(consumerA);
+        vm.expectRevert(abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, consumerA));
+        registry.consume(bytes32(0));
+    }
+
     function test_Consume_RevertsWhenAlreadyConsumedBySameCaller() public {
+        _authorize(consumerA);
         vm.prank(consumerA);
         registry.consume(purchaseRef1);
 
@@ -76,6 +150,8 @@ contract PurchaseRefRegistryTest is Test {
     }
 
     function test_Consume_RevertsWhenAlreadyConsumedByDifferentCaller() public {
+        _authorize(consumerA);
+        _authorize(consumerB);
         vm.prank(consumerA);
         registry.consume(purchaseRef1);
 
@@ -89,6 +165,7 @@ contract PurchaseRefRegistryTest is Test {
     function test_Consume_AllowsDifferentRefsForSameConsumer() public {
         uint64 firstConsumedAt = 1_700_000_000;
         uint64 secondConsumedAt = firstConsumedAt + 1;
+        _authorize(consumerA);
 
         vm.warp(firstConsumedAt);
         vm.prank(consumerA);
@@ -105,6 +182,8 @@ contract PurchaseRefRegistryTest is Test {
     function test_Consume_AllowsDifferentConsumersForDifferentRefs() public {
         uint64 firstConsumedAt = 1_700_000_000;
         uint64 secondConsumedAt = firstConsumedAt + 1;
+        _authorize(consumerA);
+        _authorize(consumerB);
 
         vm.warp(firstConsumedAt);
         vm.prank(consumerA);
@@ -119,6 +198,7 @@ contract PurchaseRefRegistryTest is Test {
     }
 
     function test_Consume_DoesNotModifyOtherRefs() public {
+        _authorize(consumerA);
         vm.prank(consumerA);
         registry.consume(purchaseRef1);
 
