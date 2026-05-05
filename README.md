@@ -448,11 +448,32 @@ After deployment, record:
 - chain ID
 - `PurchaseRefRegistry` address
 - `ReceiptStore` address
-- deploy transaction hash
+- registry deploy transaction hash
+- receipt store deploy transaction hash
+- registry authorization transaction hash
 - settlement token
 - fee recipient
-- owner
+- protocol owner
+- registry owner
 - protocol fee bps
+
+Current Arbitrum Sepolia deployment as of 2026-05-05:
+
+- chain ID: `421614`
+- `PurchaseRefRegistry`: `0x18E806446a46be35B5AF7488489c721b419e3Ae8`
+- registry deploy tx: `0x0792017e12748256d7b63ae6a6395d09d90bb6f267731dd23e80a1604bc7cd24`
+- registry deploy block: `265681261`
+- `ReceiptStore`: `0x106Cfb8CC6E0ce19F62B64aB848314B2b2288Fb1`
+- receipt store deploy tx: `0xc754da5a55b0f9ef8eccc4032455db2bb0fc52a0d6e2ddefe4ed191266d4b10c`
+- receipt store deploy block: `265681302`
+- registry authorization tx: `0x06188cd7f6060975a12e0b8ddbaded504e88e76f46a2e8539994130ba3a67a7c`
+- registry authorization block: `265681324`
+- settlement token: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
+- fee recipient: `0xdEf8E3337A9E914aBc7bC93230a3AA795De6FB36`
+- protocol owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
+- registry owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
+- receipt store authorized in registry: `true`
+- protocol fee bps: `500`
 
 ## Roadmap
 
