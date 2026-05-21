@@ -457,23 +457,23 @@ After deployment, record:
 - registry owner
 - protocol fee bps
 
-Current Arbitrum Sepolia deployment as of 2026-05-05:
+Current Arbitrum Sepolia deployment as of 2026-05-21:
 
 - chain ID: `421614`
-- `PurchaseRefRegistry`: `0x18E806446a46be35B5AF7488489c721b419e3Ae8`
-- registry deploy tx: `0x0792017e12748256d7b63ae6a6395d09d90bb6f267731dd23e80a1604bc7cd24`
-- registry deploy block: `265681261`
-- `ReceiptStore`: `0x106Cfb8CC6E0ce19F62B64aB848314B2b2288Fb1`
-- receipt store deploy tx: `0xc754da5a55b0f9ef8eccc4032455db2bb0fc52a0d6e2ddefe4ed191266d4b10c`
-- receipt store deploy block: `265681302`
-- registry authorization tx: `0x06188cd7f6060975a12e0b8ddbaded504e88e76f46a2e8539994130ba3a67a7c`
-- registry authorization block: `265681324`
+- `PurchaseRefRegistry`: `0xE0C8465a11A898B3Ce1c0272A217A571a5214AA8`
+- registry deploy tx: `0x891b6435b30e5ab6b153dae5251b0252f43b978fc9aff036369cc570eaffe910`
+- registry deploy block: `269902337`
+- `ReceiptStore`: `0x6957F04B9CB9BB5f94933350E37cc5606c83Bc7c`
+- receipt store deploy tx: `0x973a55b4332ca4a42d800d0b7ca80efa6f09791f5c658fd08be70dd09e228f72`
+- receipt store deploy block: `269902351`
+- registry authorization tx: `0x551d2a2465902d61cdf85f925e50504c34b7e8eaf14fc9596f9a1fb06b20d78c`
+- registry authorization block: `269902362`
 - settlement token: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
-- fee recipient: `0xdEf8E3337A9E914aBc7bC93230a3AA795De6FB36`
-- protocol owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
-- registry owner: `0xc3549AAc0EB0F3310e116BC72B03B20ae8a1e03e`
+- fee recipient: `0xbe617788D0Daad3652405c152b0cA79a7752fFDF`
+- protocol owner: `0x2a2Ff0297D8f4bc80B8c695e4c0E5D535490144f`
+- registry owner: `0x2a2Ff0297D8f4bc80B8c695e4c0E5D535490144f`
 - receipt store authorized in registry: `true`
-- protocol fee bps: `500`
+- protocol fee bps: `50`
 
 ## Roadmap
 
