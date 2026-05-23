@@ -13,7 +13,7 @@ import {FeeMath} from "./FeeMath.sol";
 import {PurchaseRefRegistry} from "./PurchaseRefRegistry.sol";
 
 /// @title RevealReceiptStore
-/// @notice Seller-first managed receipt contract for zkReveal Receipt Mode.
+/// @notice Seller-first managed receipt contract for Reveal Protocol Receipt Mode.
 /// @dev Sellers create listings with opaque metadata commitments, buyers pay with protocol-scoped
 /// `purchaseRef` hashes derived from off-chain raw purchase references, and settlement completes
 /// immediately with an on-chain receipt record. Replay protection is enforced canonically through
@@ -579,11 +579,11 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      is not buyer-bound before submission, and records `msg.sender` as the buyer. Any
     ///      wallet that submits a valid unconsumed `purchaseRef` first and pays first receives the
     ///      receipt. `purchaseRef` should normally be the output of
-    ///      `hashPurchaseRef(seller, listingId, rawPurchaseRef)`, where `rawPurchaseRef` remains
+    ///      `hashPurchaseRef(seller, rawPurchaseRef)`, where `rawPurchaseRef` remains
     ///      off-chain in the seller, bot, or backend system. That readable raw reference can later
     ///      be revealed or reused for support, reconciliation, buyer proof, or seller accounting.
     ///      `purchaseRef` is a protocol-scoped hash consumed through `PurchaseRefRegistry`,
-    ///      preventing replay across current and future zkReveal settlement contracts that share
+    ///      preventing replay across current and future Reveal Protocol settlement contracts that share
     ///      the registry. Use `purchaseSignedReceipt` instead for buyer-bound payment links,
     ///      private checkout flows, dynamic pricing, or integrator fees. Payment settles
     ///      immediately and fulfillment remains entirely off-chain in seller systems. Receipt
@@ -649,8 +649,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     /// @notice Return the canonical on-chain `purchaseRef` hash for an off-chain `rawPurchaseRef`.
     /// @dev `rawPurchaseRef` should be a short seller-side order reference such as
-    ///      `ord_tg_20260502_f8K2pQ9z`. The hash is scoped by the
-    ///      `zkReveal.purchaseRef.receipt.v1` domain, `block.chainid`, the settlement token,
+    ///      `ord_tg_20260502_f8K2pQ9z`. The hash is scoped by the Reveal Protocol domain string
+    ///      `zkReveal.purchaseRef.receipt.v1`, `block.chainid`, the settlement token,
     ///      `seller`, and `rawPurchaseRef`, so `rawPurchaseRef` does not need to include seller,
     ///      chain, token, or domain data itself. `listingId` is used only to validate that the
     ///      listing exists and belongs to `seller`; it is not included in the final hash. The

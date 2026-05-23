@@ -5,7 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @title PurchaseRefRegistry
-/// @notice Canonical consume-once registry for zkReveal protocol purchase references.
+/// @notice Canonical consume-once registry for Reveal Protocol purchase references.
 /// @dev This contract is intentionally minimal, immutable, and non-upgradeable. Purchase refs
 ///      can only be consumed once and can never be deleted or unconsumed, including by the
 ///      registry owner. Only settlement contracts or modules explicitly authorized by the owner

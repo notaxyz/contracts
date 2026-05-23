@@ -4,7 +4,7 @@ For production checkout and payment-link flows, prefer signed quotes.
 
 ## Architecture
 
-zkReveal receipt mode has two immutable contracts:
+Reveal Protocol receipt mode has two immutable contracts:
 
 - `PurchaseRefRegistry` is the canonical replay-protection layer. It consumes a `purchaseRef`
   once globally for every settlement contract that shares the registry.
@@ -91,7 +91,7 @@ dashboards.
 It is not part of the final hash.
 
 Because replay protection is enforced on the final hash through a shared `PurchaseRefRegistry`,
-the same `purchaseRef` cannot be reused across current or future zkReveal settlement contracts
+the same `purchaseRef` cannot be reused across current or future Reveal Protocol settlement contracts
 that share that registry. This also prevents accidental replay across different listings for the
 same seller raw order reference. Sellers should still treat every raw reference as a unique
 operational order ID and avoid reusing it across orders.
