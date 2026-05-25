@@ -17,6 +17,27 @@ v1 is Receipt Mode only.
 - v1 does not do dynamic on-chain pricing, oracle pricing, or marketplace fee routing
 - v1 does not expose cross-chain gateway adapter entrypoints
 
+## Why "zk"?
+
+The current Receipt Mode contracts do not implement zero-knowledge proofs.
+
+The contracts focus on the first production primitive of zkReveal:
+
+```text
+payment → settlement → on-chain receipt
+```
+
+The "zk" name refers to the project’s longer-term direction, where future modules may introduce privacy-preserving verification, selective disclosure, encrypted delivery, or reveal mechanisms.
+
+In the current contracts, privacy is limited to design choices such as:
+
+- storing metadata commitments instead of full metadata
+- using opaque purchase references
+- keeping fulfillment and delivery logic off-chain
+- emitting indexable payment and receipt events
+
+This README describes the current smart contract system only. It should not be read as a claim that the current contracts use ZK proofs.
+
 ## Product Model
 
 Reveal Protocol v1 receipt mode has two immutable on-chain components:
