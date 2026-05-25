@@ -8,14 +8,19 @@ Your backend receives a verifiable on-chain purchase receipt.
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchased`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
-v1 is Receipt Mode only.
+v1 is intentionally limited to Receipt Mode.
 
-- v1 is not Delivery Mode
-- v1 is not Escrow Mode
-- v1 does not support refunds or reclaim flows
-- v1 does not support buyer public keys, encrypted payloads, content CIDs, inventory units, or delivery deadlines
-- v1 does not do dynamic on-chain pricing, oracle pricing, or marketplace fee routing
-- v1 does not expose cross-chain gateway adapter entrypoints
+- v1 records payment, settlement, and receipt creation on-chain
+
+- v1 settles funds immediately
+
+- v1 supports fixed-price listings and seller-authorized signed quotes
+
+- v1 supports protocol fees and optional signed integrator fees
+
+- v1 leaves fulfillment, delivery, refunds, disputes, and customer support to off-chain seller systems
+
+- v1 does not act as a marketplace, escrow system, refund system, or delivery-verification protocol
 
 ## Why "zk"?
 
