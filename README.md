@@ -502,8 +502,8 @@ Current Arbitrum Sepolia deployment as of 2026-05-21:
 - receipt store authorized in registry: `true`
 - protocol fee bps: `50`
 
-## Roadmap
+## Scope
 
-Future roadmap may include Protected Delivery, Escrow Mode, or gateway adapters for pay-from-other-chain UX, but those are not part of Reveal Protocol v1.
+Reveal Protocol v1 is intentionally focused on receipt-mode settlement and off-chain fulfillment.
 
-The v1 core is intentionally focused on receipt-mode settlement and off-chain fulfillment.
+Future modules should be documented in their own specifications and repositories when they are designed or implemented.
