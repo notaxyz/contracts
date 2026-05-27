@@ -426,10 +426,9 @@ with that registry address wired into the constructor.
 
 Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
 `MIN_PURCHASE_AMOUNT = 1e6` and `MAX_PURCHASE_AMOUNT = 5_000e6` assume 6 decimals.
-Deploying with an 18-decimal token changes the practical meaning of those caps and is not
-recommended unless a future version adjusts the constants.
-
-For Arbitrum mainnet, use the canonical/native USDC deployment intended by the project.
+The deploy script enforces `IERC20Metadata(SETTLEMENT_TOKEN).decimals() == 6`. On Arbitrum
+One mainnet (`chainid 42161`) the script additionally pins `SETTLEMENT_TOKEN` to Circle's
+canonical native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` and rejects USDC.e (bridged).
 
 Required envs:
 
@@ -437,14 +436,19 @@ Required envs:
 - `PRIVATE_KEY`
 - `SETTLEMENT_TOKEN`
 - `FEE_RECIPIENT`
-- `PROTOCOL_FEE_BPS`
+- `PROTOCOL_FEE_BPS` — must equal `EXPECTED_PROTOCOL_FEE_BPS` in `Deploy.s.sol` (currently `50`)
 
 Optional envs:
 
-- `PROTOCOL_OWNER` to override the default owner; otherwise the deployer is used
+- `PROTOCOL_OWNER` — override the default owner. If unset (or equal to the deployer), the
+  deployer is set as the immediate owner of both contracts in their constructors and the
+  script skips `transferOwnership`, so there is no `Ownable2Step` pending-owner window. If
+  set to a different address, the registry ownership is queued to that address and the
+  target must call `acceptOwnership()` in a separate transaction before it actually owns
+  the registry.
 
-`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`.
-If `PROTOCOL_FEE_BPS=0`, `FEE_RECIPIENT` may also be omitted and the deploy script will default it to the zero address.
+`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`. The fee recipient
+is immutable post-deploy — verify the address can receive USDC before broadcasting.
 
 The deploy output logs both:
 
@@ -454,16 +458,27 @@ The deploy output logs both:
 If a future Reveal Protocol settlement contract must share replay protection with an existing deployment,
 it should be deployed against the same `PurchaseRefRegistry` address.
 
-Typical flow:
+Typical Arbitrum One mainnet flow (solo deployer, deployer == protocol owner):
+
+```bash
+export RPC_URL="https://arb1.arbitrum.io/rpc"
+export PRIVATE_KEY="0xYOUR_DEPLOYER_KEY"
+export SETTLEMENT_TOKEN="0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # Arbitrum One native USDC
+export FEE_RECIPIENT="0xYOUR_FEE_RECIPIENT"                            # separate address, immutable
+export PROTOCOL_FEE_BPS="50"
+# PROTOCOL_OWNER left unset → defaults to deployer → no pending-owner window
+
+forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast --verify
+```
+
+Arbitrum Sepolia flow (testnet, any 6-decimal USDC):
 
 ```bash
 export RPC_URL="https://your-arbitrum-sepolia-rpc"
-export PRIVATE_KEY="0xYOUR_PRIVATE_KEY"
-export SETTLEMENT_TOKEN="0xYOUR_ERC20_ON_ARBITRUM_SEPOLIA"
+export PRIVATE_KEY="0xYOUR_DEPLOYER_KEY"
+export SETTLEMENT_TOKEN="0xYOUR_TEST_USDC_ON_SEPOLIA"
 export FEE_RECIPIENT="0xYOUR_FEE_RECIPIENT"
-export PROTOCOL_FEE_BPS="0"
-# optional:
-export PROTOCOL_OWNER="0xYOUR_OWNER"
+export PROTOCOL_FEE_BPS="50"
 
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
 ```
