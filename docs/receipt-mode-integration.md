@@ -15,17 +15,22 @@ reconciliation helper. It is not the replay-protection source of truth.
 
 ## Purchase Modes
 
-### Use `purchaseReceipt(listingId, purchaseRef)` only when:
+### Use `purchaseReceipt(listingId, purchaseRef, amount)` only when:
 
 - the listing is public and fixed-price
 - any buyer may purchase
-- the current on-chain `unitPrice` is acceptable at execution time
 - you do not need buyer pre-binding
 - you do not need dynamic pricing
 - you do not need integrator fees
 
 This path is simple and public. It is not buyer-bound before submission. Anyone who submits a
 valid unconsumed `purchaseRef` first and pays first receives the receipt.
+
+`amount` is the buyer's exact-price assertion. The contract reverts with `PriceMismatch` if
+`listing.unitPrice != amount`. Listing prices are immutable in v1 (there is no `setListingPrice`)
+— to change a product's price, the seller creates a new listing. Frontends should set the ERC-20
+allowance to exactly `amount`, not `type(uint256).max`, both as defense-in-depth and so any
+client-side cache vs. chain mismatch fails fast at the allowance check.
 
 Do not use this path for seller-issued private links, Telegram checkout links, order-specific
 checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.

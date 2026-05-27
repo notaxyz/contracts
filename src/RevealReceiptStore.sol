@@ -38,7 +38,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      `5_000e6` means 5,000 USDC when the settlement token uses 6 decimals.
     uint256 public constant MAX_PURCHASE_AMOUNT = 5_000e6;
     uint64 public constant MAX_QUOTE_TTL = 24 hours;
-    uint256 public constant MAX_LISTINGS_PER_SELLER = 50;
+    uint256 public constant MAX_LISTINGS_PER_SELLER = 500;
     uint256 public constant MAX_QUOTE_SIGNERS_PER_SELLER = 3;
     string internal constant PURCHASE_REF_HASH_DOMAIN = "zkReveal.purchaseRef.receipt.v1";
     uint256 internal constant MAX_RAW_PURCHASE_REF_LENGTH = 128;
@@ -167,10 +167,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     event ListingStatusChanged(uint256 indexed listingId, address indexed seller, bool active);
 
-    event ListingPriceChanged(
-        uint256 indexed listingId, address indexed seller, uint256 oldUnitPrice, uint256 newUnitPrice
-    );
-
     event ReceiptPurchased(
         uint256 indexed receiptId,
         address indexed seller,
@@ -218,6 +214,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     error QuoteExpiryTooLong();
     error SellerListingLimitReached();
     error QuoteSignerLimitReached();
+    error PriceMismatch();
 
     // -------------------------------------------------------------------------
     // Modifiers
@@ -527,7 +524,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Create a seller-owned listing for Receipt Mode purchases.
     /// @dev `listingHash` is an opaque seller-defined metadata commitment. Human-readable product
     ///      data lives off-chain, for example inside a seller-signed payment link. `unitPrice` is
-    ///      denominated in settlement token base units.
+    ///      denominated in settlement token base units and is immutable for the lifetime of the
+    ///      listing; to change a product's price, create a new listing and optionally deactivate
+    ///      the old one with `setListingActive(listingId, false)`. Use `purchaseSignedReceipt` for
+    ///      flows that require dynamic or per-order pricing.
     function createListing(bytes32 listingHash, uint256 unitPrice) external returns (uint256 listingId) {
         if (listingCreationPaused) revert ListingCreationPaused();
         if (listingHash == bytes32(0)) revert InvalidParams();
@@ -550,24 +550,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     }
 
     /// @notice Update the active status of a seller-owned listing.
+    /// @dev Listing prices are immutable after `createListing`. To change the price for a product,
+    ///      the seller must create a new listing and optionally deactivate the old one.
     function setListingActive(uint256 listingId, bool active) external listingExists(listingId) {
         _onlyListingSeller(listingId);
         listings[listingId].active = active;
         emit ListingStatusChanged(listingId, msg.sender, active);
-    }
-
-    /// @notice Update the default fixed listing price of a seller-owned listing.
-    /// @dev `newUnitPrice` is denominated in settlement token base units.
-    ///      Signed receipt quotes may use custom amounts independent of `listing.unitPrice`.
-    function setListingPrice(uint256 listingId, uint256 newUnitPrice) external listingExists(listingId) {
-        _onlyListingSeller(listingId);
-        _validatePurchaseAmount(newUnitPrice);
-
-        Listing storage listing = listings[listingId];
-        uint256 oldUnitPrice = listing.unitPrice;
-        listing.unitPrice = newUnitPrice;
-
-        emit ListingPriceChanged(listingId, msg.sender, oldUnitPrice, newUnitPrice);
     }
 
     // -------------------------------------------------------------------------
@@ -575,20 +563,23 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     /// @notice Purchase a public fixed-price Receipt Mode listing using a protocol-scoped `purchaseRef` hash.
-    /// @dev This is the simple public purchase path. It uses the listing's current `unitPrice`,
-    ///      is not buyer-bound before submission, and records `msg.sender` as the buyer. Any
-    ///      wallet that submits a valid unconsumed `purchaseRef` first and pays first receives the
-    ///      receipt. `purchaseRef` should normally be the output of
-    ///      `hashPurchaseRef(seller, rawPurchaseRef)`, where `rawPurchaseRef` remains
-    ///      off-chain in the seller, bot, or backend system. That readable raw reference can later
-    ///      be revealed or reused for support, reconciliation, buyer proof, or seller accounting.
+    /// @dev This is the simple public purchase path. The buyer must pass the exact listing
+    ///      `unitPrice` as `amount`; the contract reverts with `PriceMismatch` if it differs in
+    ///      either direction. Together with immutable listing prices (no `setListingPrice` exists
+    ///      in v1), this means the on-chain price the buyer asserts is the price they pay. The
+    ///      caller is not buyer-bound before submission, and `msg.sender` is recorded as the
+    ///      buyer. Any wallet that submits a valid unconsumed `purchaseRef` first and pays first
+    ///      receives the receipt. `purchaseRef` should normally be the output of
+    ///      `hashPurchaseRef(seller, rawPurchaseRef)`, where `rawPurchaseRef` remains off-chain in
+    ///      the seller, bot, or backend system. That readable raw reference can later be revealed
+    ///      or reused for support, reconciliation, buyer proof, or seller accounting.
     ///      `purchaseRef` is a protocol-scoped hash consumed through `PurchaseRefRegistry`,
-    ///      preventing replay across current and future Reveal Protocol settlement contracts that share
-    ///      the registry. Use `purchaseSignedReceipt` instead for buyer-bound payment links,
+    ///      preventing replay across current and future Reveal Protocol settlement contracts that
+    ///      share the registry. Use `purchaseSignedReceipt` instead for buyer-bound payment links,
     ///      private checkout flows, dynamic pricing, or integrator fees. Payment settles
     ///      immediately and fulfillment remains entirely off-chain in seller systems. Receipt
     ///      discovery is expected to be handled from `ReceiptPurchased` events or indexers.
-    function purchaseReceipt(uint256 listingId, bytes32 purchaseRef)
+    function purchaseReceipt(uint256 listingId, bytes32 purchaseRef, uint256 amount)
         external
         nonReentrant
         listingExists(listingId)
@@ -599,12 +590,13 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
         if (!listing.active) revert ListingInactive();
         _validatePurchaseRef(purchaseRef);
+        if (listing.unitPrice != amount) revert PriceMismatch();
         if (purchaseRefRegistry.isConsumed(purchaseRef)) {
             revert PurchaseRefAlreadyUsed();
         }
 
         return _settleReceiptPurchase(
-            listingId, listing.seller, msg.sender, msg.sender, listing.unitPrice, purchaseRef, bytes32(0), address(0), 0
+            listingId, listing.seller, msg.sender, msg.sender, amount, purchaseRef, bytes32(0), address(0), 0
         );
     }
 

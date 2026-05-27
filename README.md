@@ -70,10 +70,11 @@ owner, authorizing the receipt store, and then transferring registry ownership t
 
 For production checkout/payment-link flows, prefer signed quotes.
 
-### `purchaseReceipt(listingId, purchaseRef)`
+### `purchaseReceipt(listingId, purchaseRef, amount)`
 
 - Public fixed-price listing purchase.
-- Uses the listing's current `unitPrice` at execution time.
+- The buyer passes the exact `amount` they expect to pay; the contract reverts with `PriceMismatch` if the listing's `unitPrice` differs in either direction.
+- Listing prices are immutable after `createListing`, so the price the buyer asserts is the price the buyer pays.
 - Does not bind the buyer before submission.
 - Anyone who submits a valid unconsumed `purchaseRef` and pays first receives the receipt.
 - Suitable for simple public listings where any buyer may purchase.
@@ -92,13 +93,12 @@ For production checkout/payment-link flows, prefer signed quotes.
 
 Buyer Proof Mode fits inside the fixed-price path.
 
-1. Create a fixed-price listing with `createListing(listingHash, unitPrice)`.
-2. Optionally update the fixed listing price with `setListingPrice(listingId, newUnitPrice)`.
-3. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
-4. Agree on a `rawPurchaseRef` off-chain and derive the canonical protocol-scoped `purchaseRef` with `hashPurchaseRef(seller, rawPurchaseRef)`, or compute the same hash off-chain.
-5. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef)`.
+1. Create a fixed-price listing with `createListing(listingHash, unitPrice)`. The `unitPrice` is immutable for the lifetime of the listing; to change a product's price, create a new listing.
+2. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
+3. Agree on a `rawPurchaseRef` off-chain and derive the canonical protocol-scoped `purchaseRef` with `hashPurchaseRef(seller, rawPurchaseRef)`, or compute the same hash off-chain.
+4. Buyer approves the settlement token and calls `purchaseReceipt(listingId, purchaseRef, amount)`, where `amount` must equal the listing's `unitPrice` exactly.
 
-`purchaseReceipt` is the direct fixed-price purchase path. It uses the listing's current `unitPrice`, is public, and is not buyer-bound before submission. Anyone who submits a valid unconsumed `purchaseRef` and pays first receives the receipt. It does not support integrator fees. The raw reference stays off-chain; only the derived `bytes32` hash is submitted. For production checkout/payment-link flows, prefer signed quotes.
+`purchaseReceipt` is the direct fixed-price purchase path. The buyer-passed `amount` must match `listing.unitPrice`; listing prices are immutable so the price the buyer sees on chain is the price they will pay. The call is public and is not buyer-bound before submission. Anyone who submits a valid unconsumed `purchaseRef` and pays first receives the receipt. It does not support integrator fees. The raw reference stays off-chain; only the derived `bytes32` hash is submitted. For production checkout/payment-link flows, prefer signed quotes.
 
 `listingHash` is an opaque seller-defined metadata commitment. Human-readable product data lives off-chain, for example inside a seller-signed payment link or checkout payload.
 
@@ -365,7 +365,7 @@ v1 also enforces conservative hard caps:
 - min purchase: 1 USDC (`1e6`) assuming a 6-decimal settlement token
 - max purchase: 5,000 USDC (`5_000e6`) assuming a 6-decimal settlement token
 - max quote TTL: 24 hours
-- max listings per seller: 50
+- max listings per seller: 500
 - max quote signers per seller: 3
 
 Integration guide:
@@ -387,7 +387,6 @@ Key functions:
 - `createListing`
 - `setQuoteSigner`
 - `setListingActive`
-- `setListingPrice`
 - `hashPurchaseRef`
 - `purchaseReceipt`
 - `purchaseSignedReceipt`
@@ -401,7 +400,6 @@ Key events:
 
 - `ListingCreated`
 - `ListingStatusChanged`
-- `ListingPriceChanged`
 - `QuoteSignerAuthorizationChanged`
 - `ReceiptPurchased`
 - `SellerPaid`

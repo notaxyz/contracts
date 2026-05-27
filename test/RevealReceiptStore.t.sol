@@ -88,7 +88,6 @@ contract RevealReceiptStoreTest is Test {
     bytes32 metadataHash = keccak256("metadata-1");
     bytes32 metadataHash2 = keccak256("metadata-2");
     uint256 unitPrice = 100_000_000;
-    uint256 updatedUnitPrice = 125_000_000;
     uint256 quotedAmount = 250_000_000;
     bytes32 purchaseRef = keccak256("purchase-1");
     bytes32 purchaseRef2 = keccak256("purchase-2");
@@ -205,7 +204,7 @@ contract RevealReceiptStoreTest is Test {
 
         vm.startPrank(who);
         usdc.approve(address(targetStore), listing.unitPrice);
-        receiptId = targetStore.purchaseReceipt(listingId, ref);
+        receiptId = targetStore.purchaseReceipt(listingId, ref, listing.unitPrice);
         vm.stopPrank();
     }
 
@@ -676,7 +675,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.ListingInactive.selector);
-        store.purchaseReceipt(listingId, purchaseRef);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
 
         vm.prank(seller);
@@ -692,65 +691,6 @@ contract RevealReceiptStoreTest is Test {
         vm.prank(attacker);
         vm.expectRevert(RevealReceiptStore.NotListingSeller.selector);
         store.setListingActive(listingId, false);
-    }
-
-    function test_SetListingPrice_UpdatesPriceAndEmits() public {
-        uint256 listingId = _createListingAsSeller();
-
-        vm.expectEmit(true, true, false, true);
-        emit RevealReceiptStore.ListingPriceChanged(listingId, seller, unitPrice, updatedUnitPrice);
-
-        vm.prank(seller);
-        store.setListingPrice(listingId, updatedUnitPrice);
-
-        RevealReceiptStore.Listing memory listing = store.getListing(listingId);
-        assertEq(listing.unitPrice, updatedUnitPrice);
-    }
-
-    function test_SetListingPrice_NonSellerReverts() public {
-        uint256 listingId = _createListingAsSeller();
-
-        vm.prank(attacker);
-        vm.expectRevert(RevealReceiptStore.NotListingSeller.selector);
-        store.setListingPrice(listingId, updatedUnitPrice);
-    }
-
-    function test_SetListingPrice_BelowMinReverts() public {
-        uint256 listingId = _createListingAsSeller();
-        uint256 belowMinPurchaseAmount = store.MIN_PURCHASE_AMOUNT() - 1;
-
-        vm.prank(seller);
-        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
-        store.setListingPrice(listingId, belowMinPurchaseAmount);
-    }
-
-    function test_SetListingPrice_AtMinSucceeds() public {
-        uint256 listingId = _createListingAsSeller();
-        uint256 minPurchaseAmount = store.MIN_PURCHASE_AMOUNT();
-
-        vm.prank(seller);
-        store.setListingPrice(listingId, minPurchaseAmount);
-
-        assertEq(store.getListing(listingId).unitPrice, minPurchaseAmount);
-    }
-
-    function test_SetListingPrice_AtMaxSucceeds() public {
-        uint256 listingId = _createListingAsSeller();
-        uint256 maxPurchaseAmount = store.MAX_PURCHASE_AMOUNT();
-
-        vm.prank(seller);
-        store.setListingPrice(listingId, maxPurchaseAmount);
-
-        assertEq(store.getListing(listingId).unitPrice, maxPurchaseAmount);
-    }
-
-    function test_SetListingPrice_AboveMaxReverts() public {
-        uint256 listingId = _createListingAsSeller();
-        uint256 aboveMax = store.MAX_PURCHASE_AMOUNT() + 1;
-
-        vm.prank(seller);
-        vm.expectRevert(RevealReceiptStore.AmountOutOfBounds.selector);
-        store.setListingPrice(listingId, aboveMax);
     }
 
     function test_SetQuoteSigner_AuthorizesSigner() public {
@@ -875,7 +815,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchasesPaused.selector);
-        store.purchaseReceipt(listingId, purchaseRef);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -900,14 +840,11 @@ contract RevealReceiptStoreTest is Test {
         store.setPurchasesPaused(true);
 
         vm.prank(seller);
-        store.setListingPrice(listingId, updatedUnitPrice);
-
-        vm.prank(seller);
         store.setListingActive(listingId, false);
 
         RevealReceiptStore.Listing memory listing = store.getListing(listingId);
 
-        assertEq(listing.unitPrice, updatedUnitPrice);
+        assertEq(listing.unitPrice, unitPrice);
         assertFalse(listing.active);
         assertEq(store.listingCountBySeller(seller), 1);
     }
@@ -945,7 +882,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0));
 
-        uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef);
+        uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
 
         assertEq(receiptId, 1);
@@ -987,7 +924,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, false, true, address(registry));
         emit PurchaseRefRegistry.PurchaseRefConsumed(purchaseRef, address(store), uint64(block.timestamp));
 
-        store.purchaseReceipt(listingId, purchaseRef);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1010,7 +947,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0));
 
-        feeStore.purchaseReceipt(listingId, purchaseRef);
+        feeStore.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore + protocolFee);
@@ -1019,29 +956,40 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(address(feeStore)), 0);
     }
 
-    function test_PurchaseReceipt_ChargesUpdatedPriceAfterPriceUpdate() public {
+    function test_PurchaseReceipt_RevertsWhenAmountAboveListingPrice() public {
         uint256 listingId = _createListingAsSeller();
-        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
-        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
-
-        vm.prank(seller);
-        store.setListingPrice(listingId, updatedUnitPrice);
 
         vm.startPrank(buyer);
-        usdc.approve(address(store), updatedUnitPrice);
-
-        vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.SellerPaid(1, listingId, seller, updatedUnitPrice);
-        vm.expectEmit(true, true, true, true);
-        emit RevealReceiptStore.ReceiptPurchased(1, seller, buyer, listingId, purchaseRef, updatedUnitPrice, bytes32(0));
-
-        uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef);
+        usdc.approve(address(store), unitPrice + 1);
+        vm.expectRevert(RevealReceiptStore.PriceMismatch.selector);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice + 1);
         vm.stopPrank();
 
-        RevealReceiptStore.Receipt memory receipt = store.getReceipt(receiptId);
-        assertEq(receipt.amount, updatedUnitPrice);
-        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - updatedUnitPrice);
-        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + updatedUnitPrice);
+        _assertRegistryNotConsumed(purchaseRef);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), 0);
+    }
+
+    function test_PurchaseReceipt_RevertsWhenAmountBelowListingPrice() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PriceMismatch.selector);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice - 1);
+        vm.stopPrank();
+
+        _assertRegistryNotConsumed(purchaseRef);
+        assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), 0);
+    }
+
+    function test_PurchaseReceipt_RevertsWhenAmountIsZero() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(RevealReceiptStore.PriceMismatch.selector);
+        store.purchaseReceipt(listingId, purchaseRef, 0);
+        vm.stopPrank();
     }
 
     function test_PurchaseReceipt_ZeroPurchaseRefReverts() public {
@@ -1050,7 +998,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.InvalidPurchaseRef.selector);
-        store.purchaseReceipt(listingId, bytes32(0));
+        store.purchaseReceipt(listingId, bytes32(0), unitPrice);
         vm.stopPrank();
     }
 
@@ -1062,7 +1010,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer2);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseReceipt(listingId, purchaseRef);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1076,7 +1024,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer2);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseReceipt(listingId, canonicalPurchaseRef);
+        store.purchaseReceipt(listingId, canonicalPurchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1094,7 +1042,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer2);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseReceipt(listingId2, listing2PurchaseRef);
+        store.purchaseReceipt(listingId2, listing2PurchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1121,7 +1069,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer2);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseReceipt(listingId2, purchaseRef);
+        store.purchaseReceipt(listingId2, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1139,7 +1087,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer2);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseReceipt(listingId2, purchaseRef);
+        store.purchaseReceipt(listingId2, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1148,7 +1096,7 @@ contract RevealReceiptStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert();
-        store.purchaseReceipt(listingId, purchaseRef);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice);
 
         _assertRegistryNotConsumed(purchaseRef);
         assertEq(store.getReceiptIdBySellerAndPurchaseRef(seller, purchaseRef), 0);
@@ -1168,7 +1116,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseReceipt(listingId, purchaseRef);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1176,7 +1124,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), unitPrice);
         vm.expectRevert(RevealReceiptStore.ListingNotFound.selector);
-        store.purchaseReceipt(999, purchaseRef);
+        store.purchaseReceipt(999, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1191,7 +1139,7 @@ contract RevealReceiptStoreTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, address(unauthorizedStore))
         );
-        unauthorizedStore.purchaseReceipt(listingId, purchaseRef);
+        unauthorizedStore.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -1959,7 +1907,7 @@ contract RevealReceiptStoreTest is Test {
         vm.startPrank(buyer2);
         usdc.approve(address(secondStore), unitPrice);
         vm.expectRevert(RevealReceiptStore.PurchaseRefAlreadyUsed.selector);
-        secondStore.purchaseReceipt(secondListingId, purchaseRef);
+        secondStore.purchaseReceipt(secondListingId, purchaseRef, unitPrice);
         vm.stopPrank();
     }
 
@@ -2430,22 +2378,6 @@ contract RevealReceiptStoreTest is Test {
         assertEq(grossAmount, unitPrice);
         assertEq(protocolFee, 0);
         assertEq(sellerNet, unitPrice);
-        assertEq(quotedFeeRecipient, feeRecipient);
-    }
-
-    function test_QuotePurchaseReceipt_ReturnsUpdatedPriceAfterPriceUpdate() public {
-        RevealReceiptStore feeStore = _deployStore(500);
-        uint256 listingId = _createListingAs(feeStore, seller, listingHash);
-
-        vm.prank(seller);
-        feeStore.setListingPrice(listingId, updatedUnitPrice);
-
-        (uint256 grossAmount, uint256 protocolFee, uint256 sellerNet, address quotedFeeRecipient) =
-            feeStore.quotePurchaseReceipt(listingId);
-
-        assertEq(grossAmount, updatedUnitPrice);
-        assertEq(protocolFee, updatedUnitPrice * 500 / 10_000);
-        assertEq(sellerNet, updatedUnitPrice - protocolFee);
         assertEq(quotedFeeRecipient, feeRecipient);
     }
 
