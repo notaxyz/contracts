@@ -448,8 +448,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ) internal returns (uint256 receiptId) {
         RakeQuote memory rake = _quoteRake(amount, integratorFeeRecipient, integratorFeeAmount);
 
-        purchaseRefRegistry.consume(purchaseRef);
         settlementToken.safeTransferFrom(payer, address(this), amount);
+        purchaseRefRegistry.consume(purchaseRef);
 
         receiptId = nextReceiptId++;
 

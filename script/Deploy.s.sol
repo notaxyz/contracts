@@ -8,6 +8,8 @@ import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
 
 contract Deploy is Script {
     uint256 internal constant MAX_PROTOCOL_FEE_BPS = 1_000;
+    /// @dev Update this constant deliberately when the launch fee changes.
+    uint256 internal constant EXPECTED_PROTOCOL_FEE_BPS = 50;
 
     function run() external {
         uint256 pk = vm.envUint("PRIVATE_KEY");
@@ -20,7 +22,10 @@ contract Deploy is Script {
         require(pk != 0, "PRIVATE_KEY is zero");
         require(settlementToken != address(0), "SETTLEMENT_TOKEN is zero");
         require(protocolOwner != address(0), "PROTOCOL_OWNER is zero");
-        require(protocolFeeBpsRaw <= MAX_PROTOCOL_FEE_BPS, "PROTOCOL_FEE_BPS too high");
+        require(
+            protocolFeeBpsRaw == EXPECTED_PROTOCOL_FEE_BPS,
+            "PROTOCOL_FEE_BPS does not match EXPECTED_PROTOCOL_FEE_BPS  update the constant deliberately"
+        );
         if (protocolFeeBpsRaw > 0) {
             require(feeRecipient != address(0), "FEE_RECIPIENT is zero");
         }
