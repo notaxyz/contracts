@@ -1,0 +1,31 @@
+{
+  "network": "robinhood-testnet",
+  "chainId": 46630,
+  "deployedAt": "2026-06-13T10:32:32Z",
+  "broadcastTimestampMs": 1781346752758,
+  "gitCommit": "0e9ff82",
+  "deployer": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+  "protocolOwner": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+  "settlementToken": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+  "settlementTokenSymbol": "USDG",
+  "feeRecipient": "0x6DAB8178ad6a8a54A6F7A46af6126613f076a8dA",
+  "protocolFeeBps": 50,
+  "purchaseRefRegistry": {
+    "address": "0x99A79D2ffaA4871342F99631f322b6bb81E474be",
+    "deployTxHash": "0x84e9e4c2d68ce18285485a8e18d4c2ed8099e8a5eae2a68129f9c45f0c479309",
+    "deployBlock": 74753559,
+    "owner": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+    "pendingOwner": "0x0000000000000000000000000000000000000000"
+  },
+  "revealReceiptStore": {
+    "address": "0x46035d3e574A0d7044914f8C1f8B5F9c76889841",
+    "deployTxHash": "0x9d7de2beea0ad5fdbf7a81d45823114e1f387c70350d49841dfc1a2493ea6001",
+    "deployBlock": 74753561,
+    "owner": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+    "authorizedInPurchaseRefRegistry": true
+  },
+  "registryAuthorization": {
+    "txHash": "0xc596ca78b4c2f48d0a13dc64358d82cf7e08d153b2aa123c45ad3b0f1adf474d",
+    "block": 74753561
+  }
+}

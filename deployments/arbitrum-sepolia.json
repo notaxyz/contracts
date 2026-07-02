@@ -1,0 +1,30 @@
+{
+  "network": "arbitrum-sepolia",
+  "chainId": 421614,
+  "deployedAt": "2026-06-13T09:20:00Z",
+  "broadcastTimestampMs": 1781342400489,
+  "gitCommit": "cca6a13",
+  "deployer": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+  "protocolOwner": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+  "settlementToken": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "feeRecipient": "0x6DAB8178ad6a8a54A6F7A46af6126613f076a8dA",
+  "protocolFeeBps": 50,
+  "purchaseRefRegistry": {
+    "address": "0xfDf6a813CF63fae7dE7348f9C8eD13E5546a3F3C",
+    "deployTxHash": "0xd90ab68b11d5aa00d4407273170add64568b107c9fa78ba24b1d0752b85bc46b",
+    "deployBlock": 276748713,
+    "owner": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+    "pendingOwner": "0x0000000000000000000000000000000000000000"
+  },
+  "revealReceiptStore": {
+    "address": "0x866043aec88A7a6317f0Bc3dB2Ca9A0f438d3Da2",
+    "deployTxHash": "0x7c325a7ed1170ca23c8fb91ab71418998d2b78facd00282bb42269335f955a27",
+    "deployBlock": 276748724,
+    "owner": "0x8220427e83fA9c9fe1d1275C335c5583903E7540",
+    "authorizedInPurchaseRefRegistry": true
+  },
+  "registryAuthorization": {
+    "txHash": "0x4700f5eeb210d915ef90273657033c47017c5c970e9c3d663d417e34fdb18602",
+    "block": 276748734
+  }
+}

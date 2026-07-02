@@ -1,0 +1,33 @@
+{
+  "network": "arbitrum-one",
+  "chainId": 42161,
+  "deployedAt": "2026-06-13T12:33:51Z",
+  "broadcastTimestampMs": 1781354031214,
+  "gitCommit": "ca31fa1",
+  "deployer": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
+  "protocolOwner": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
+  "settlementToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+  "settlementTokenSymbol": "USDC",
+  "feeRecipient": "0x6DAB8178ad6a8a54A6F7A46af6126613f076a8dA",
+  "protocolFeeBps": 50,
+  "purchaseRefRegistry": {
+    "address": "0x6c55B0211cCF687F1505f03a7436302e59564446",
+    "deployTxHash": "0x0bace0644231509714ddc8bb15634fbc5294135008663402c2365230b93978ab",
+    "deployBlock": 473063929,
+    "owner": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
+    "pendingOwner": "0x0000000000000000000000000000000000000000",
+    "arbiscanVerified": true
+  },
+  "revealReceiptStore": {
+    "address": "0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0",
+    "deployTxHash": "0xa0335e8b510b2c6c565bf011c457405d13c34cd2c4dfeb578e7787c82e8a25ab",
+    "deployBlock": 473063947,
+    "owner": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
+    "authorizedInPurchaseRefRegistry": true,
+    "arbiscanVerified": true
+  },
+  "registryAuthorization": {
+    "txHash": "0x8ff6394842fe07392182acf0a1c10efd449fd8da5cae24c4eeb3a5d5cc50ae3b",
+    "block": 473063959
+  }
+}
