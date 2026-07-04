@@ -1,0 +1,65 @@
+{
+  "name": "@reveal-protocol/contracts",
+  "version": "0.1.0",
+  "description": "Contract ABIs and deployment metadata for Reveal Protocol.",
+  "type": "module",
+  "private": false,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zkreveal/contracts.git"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "abis",
+    "deployments",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./abis": {
+      "types": "./dist/abis.d.ts",
+      "import": "./dist/abis.js",
+      "default": "./dist/abis.js"
+    },
+    "./deployments": {
+      "types": "./dist/deployments.d.ts",
+      "import": "./dist/deployments.js",
+      "default": "./dist/deployments.js"
+    },
+    "./chains": {
+      "types": "./dist/chains.d.ts",
+      "import": "./dist/chains.js",
+      "default": "./dist/chains.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "default": "./dist/types.js"
+    },
+    "./abis/*": "./abis/*",
+    "./deployments/*": "./deployments/*"
+  },
+  "scripts": {
+    "build:contracts": "forge build",
+    "extract:abis": "node scripts/extract-abis.mjs",
+    "validate:deployments": "node scripts/validate-deployments.mjs",
+    "generate:deployments": "node scripts/generate-deployments.mjs",
+    "compile:package": "tsc -p tsconfig.json",
+    "build:package": "npm run extract:abis && npm run validate:deployments && npm run generate:deployments && npm run compile:package",
+    "build": "npm run build:contracts && npm run extract:abis && npm run validate:deployments && npm run generate:deployments && npm run compile:package",
+    "prepare": "npm run build",
+    "test": "forge test",
+    "clean": "rm -rf dist out cache"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

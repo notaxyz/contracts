@@ -17,6 +17,9 @@ dist/
 coverage/
 lcov.info
 
+# Generated package sources (rebuilt by npm run build)
+package/src/*.generated.ts
+
 # Node
 node_modules/
 
