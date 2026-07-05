@@ -55,7 +55,8 @@
     "compile:package": "tsc -p tsconfig.json",
     "build:package": "npm run extract:abis && npm run validate:deployments && npm run generate:deployments && npm run compile:package",
     "build": "npm run build:contracts && npm run extract:abis && npm run validate:deployments && npm run generate:deployments && npm run compile:package",
-    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
+    "smoke:package": "node scripts/smoke-import.mjs",
     "test": "forge test",
     "clean": "rm -rf dist out cache"
   },
