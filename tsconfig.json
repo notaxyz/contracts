@@ -12,6 +12,7 @@
     "declarationMap": true,
     "sourceMap": true,
     "strict": true,
+    "noEmitOnError": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
     "forceConsistentCasingInFileNames": true

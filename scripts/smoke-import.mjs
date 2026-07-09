@@ -1,8 +1,33 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distEntry = pathToFileURL(path.join(rootDir, "dist", "index.js")).href;
+
+const requiredDistFiles = [
+  "dist/index.js",
+  "dist/index.d.ts",
+  "dist/abis.js",
+  "dist/abis.generated.js",
+  "dist/abis.generated.d.ts",
+  "dist/deployments.js",
+  "dist/deployments.generated.js",
+  "dist/deployments.generated.d.ts",
+  "dist/chains.js",
+  "dist/types.js"
+];
+
+const missingDistFiles = requiredDistFiles.filter((file) => !existsSync(path.join(rootDir, file)));
+
+if (missingDistFiles.length > 0) {
+  console.error("Smoke import failed: dist/ is incomplete. Missing files:");
+  for (const file of missingDistFiles) {
+    console.error(`- ${file}`);
+  }
+  console.error("Run `npm run build` first.");
+  process.exit(1);
+}
 
 const errors = [];
 
