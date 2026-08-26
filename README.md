@@ -495,6 +495,10 @@ Integration guide:
 
 - [`docs/receipt-mode-integration.md`](docs/receipt-mode-integration.md)
 
+Measured gas, before and after the storage-free receipt change:
+
+- [`docs/benchmarks.md`](docs/benchmarks.md)
+
 ## Contract Surface
 
 Core contract:
