@@ -464,7 +464,7 @@ Constraints:
 - `integratorFeeRecipient` must be the zero address when `integratorFeeAmount = 0`
 - `integratorFeeRecipient` must be non-zero when `integratorFeeAmount > 0`
 - official v1 deployments are intended for a 6-decimal settlement token such as USDC
-- `MIN_PURCHASE_AMOUNT = 1e6` assumes 6 decimals and means 1 USDC
+- `MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC
 - there is no protocol-level maximum purchase amount in this contract
 - large purchases are controlled by seller quote policy, frontend/backend limits, token allowance and balance, and operational risk controls
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless constants are adjusted in a future version
@@ -486,7 +486,7 @@ The owner can independently pause:
 
 v1 also enforces conservative protocol limits:
 
-- min purchase: 1 USDC (`1e6`) assuming a 6-decimal settlement token
+- min purchase: 0.0001 USDC (`1e2`) assuming a 6-decimal settlement token
 - max quote TTL: 24 hours
 - max listings per seller: 500
 - max quote signers per seller: 3
@@ -552,7 +552,13 @@ The v1 deploy script deploys `PurchaseRefRegistry` first and then deploys `NotaR
 with that registry address wired into the constructor.
 
 Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
-`MIN_PURCHASE_AMOUNT = 1e6` assumes 6 decimals and means 1 USDC.
+`MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC. The floor is deliberately
+low so x402 agent payments, which are typically fractions of a cent, can settle.
+
+Fee rounding at that size favours the seller. Both fees floor-divide and the caps sum to 500 bps,
+so `protocolFee + integratorFee` is at most 5% of gross and `sellerNet` is never zero. At the floor
+itself a 50 bps protocol fee rounds to zero — it needs `grossAmount >= 200` to reach one base
+unit — so on a fee-charging deployment the smallest purchases pay no protocol fee at all.
 There is no protocol-level maximum purchase amount in this contract. Large purchases are
 controlled by seller quote policy, frontend/backend limits, token allowance and balance, and
 operational risk controls.

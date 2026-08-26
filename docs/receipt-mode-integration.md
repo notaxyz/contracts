@@ -250,7 +250,7 @@ The seller wallet itself remains a valid direct signer without being registered 
 
 Official v1 deployments are intended for 6-decimal settlement tokens such as USDC.
 
-- `MIN_PURCHASE_AMOUNT = 1e6` assumes 1 USDC
+- `MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC
 - there is no protocol-level maximum purchase amount in this contract
 - large purchases are controlled by seller quote policy, frontend/backend limits, token allowance and balance, and operational risk controls
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless a future version adjusts the constants

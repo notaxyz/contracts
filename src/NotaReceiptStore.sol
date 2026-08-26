@@ -40,9 +40,20 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @dev 450 bps = 4.5%. Combined with the protocol fee cap, v1 fees cannot exceed 5%.
     uint16 public constant MAX_INTEGRATOR_FEE_BPS = 450;
     /// @dev v1 assumes a 6-decimal settlement token such as USDC.
-    ///      `1e6` means 1 USDC when the settlement token uses 6 decimals.
+    ///      `1e2` means 0.0001 USDC when the settlement token uses 6 decimals. The floor is set
+    ///      this low deliberately: x402 agent payments are typically fractions of a cent, and a
+    ///      1 USDC floor excluded them entirely.
+    ///
+    ///      Fee math holds at the floor. Both fees floor-divide, and the caps sum to 500 bps, so
+    ///      `protocolFee + integratorFee <= grossAmount / 20` for every amount -- fees can never
+    ///      reach the gross, and `sellerNet` is always at least 95% of it. At the floor itself a
+    ///      50 bps protocol fee rounds to zero (it needs `grossAmount >= 200` to reach 1 base
+    ///      unit) and the integrator fee caps at 4, so the seller nets at least 96 of 100.
+    ///      Rounding therefore favours the seller, never the other way, and a zero `sellerNet`
+    ///      is unreachable rather than merely unlikely.
+    ///
     ///      This contract enforces only a minimum purchase amount.
-    uint256 public constant MIN_PURCHASE_AMOUNT = 1e6;
+    uint256 public constant MIN_PURCHASE_AMOUNT = 1e2;
     uint64 public constant MAX_QUOTE_TTL = 24 hours;
     uint256 public constant MAX_LISTINGS_PER_SELLER = 500;
     uint256 public constant MAX_QUOTE_SIGNERS_PER_LISTING = 3;

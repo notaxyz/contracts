@@ -1970,6 +1970,86 @@ contract NotaReceiptStoreTest is Test {
         assertEq(_lastEmittedReceipt().amount, store.MIN_PURCHASE_AMOUNT());
     }
 
+    /// @dev The floor is 1e2 so x402 agent payments (fractions of a cent) can settle. At that
+    ///      size a 50 bps protocol fee floor-divides to zero -- it needs grossAmount >= 200 to
+    ///      reach a single base unit -- so the seller nets the entire gross.
+    function test_PurchaseSignedReceipt_AtFloorRoundsProtocolFeeToZero() public {
+        NotaReceiptStore feeStore = _deployStore(50);
+        uint256 listingId = _createListingAs(feeStore, seller, listingHash);
+        uint256 floorAmount = feeStore.MIN_PURCHASE_AMOUNT();
+        assertEq(floorAmount, 1e2);
+
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, floorAmount, uint64(block.timestamp + 1 days));
+
+        (, uint256 protocolFee, uint256 integratorFee, uint256 sellerNet,,,,) =
+            feeStore.previewSignedReceiptPurchase(quote);
+
+        assertEq(protocolFee, 0);
+        assertEq(integratorFee, 0);
+        assertEq(sellerNet, floorAmount);
+
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
+        _purchaseSignedReceiptAs(feeStore, buyer, quote, signature);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + floorAmount);
+    }
+
+    /// @dev Worst case at the floor: max protocol fee and the largest integrator fee the cap
+    ///      allows. The seller still nets 96 of 100, so a zero payout is not reachable.
+    function test_PurchaseSignedReceipt_AtFloorWithMaxIntegratorFeeStillPaysSeller() public {
+        NotaReceiptStore feeStore = _deployStore(50);
+        uint256 listingId = _createListingAs(feeStore, seller, listingHash);
+        uint256 floorAmount = feeStore.MIN_PURCHASE_AMOUNT();
+        uint256 maxIntegratorFee = floorAmount * feeStore.MAX_INTEGRATOR_FEE_BPS() / 10_000;
+        assertEq(maxIntegratorFee, 4);
+
+        NotaReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId, buyer, purchaseRef, floorAmount, INTEGRATOR, maxIntegratorFee, uint64(block.timestamp + 1 days)
+        );
+
+        (, uint256 protocolFee, uint256 integratorFee, uint256 sellerNet,,,,) =
+            feeStore.previewSignedReceiptPurchase(quote);
+
+        assertEq(protocolFee, 0);
+        assertEq(integratorFee, 4);
+        assertEq(sellerNet, 96);
+    }
+
+    /// @dev The invariants the lowered floor has to hold across the whole amount range: fees can
+    ///      never reach the gross, sellerNet is never zero, and nothing is lost or created in the
+    ///      split. Runs against a 50 bps store, the worst case for the seller.
+    function testFuzz_PreviewSignedReceiptPurchase_FeesNeverReachGross(uint256 rawAmount, uint256 rawIntegratorFee)
+        public
+    {
+        NotaReceiptStore feeStore = _deployStore(50);
+        uint256 listingId = _createListingAs(feeStore, seller, listingHash);
+
+        uint256 amount = bound(rawAmount, feeStore.MIN_PURCHASE_AMOUNT(), 1e15);
+        uint256 maxIntegratorFee = amount * feeStore.MAX_INTEGRATOR_FEE_BPS() / 10_000;
+        uint256 integratorFeeAmount = bound(rawIntegratorFee, 0, maxIntegratorFee);
+        address integratorRecipient = integratorFeeAmount == 0 ? address(0) : INTEGRATOR;
+
+        NotaReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+            listingId,
+            buyer,
+            purchaseRef,
+            amount,
+            integratorRecipient,
+            integratorFeeAmount,
+            uint64(block.timestamp + 1 days)
+        );
+
+        (, uint256 protocolFee, uint256 integratorFee, uint256 sellerNet,,,,) =
+            feeStore.previewSignedReceiptPurchase(quote);
+
+        // Both fees floor-divide and the caps sum to 500 bps, so the rake is at most 5%.
+        assertLe(protocolFee + integratorFee, amount / 20);
+        assertLt(protocolFee + integratorFee, amount);
+        assertGt(sellerNet, 0);
+        assertEq(protocolFee + integratorFee + sellerNet, amount);
+    }
+
     function test_PurchaseSignedReceipt_LargeQuoteAmountSucceeds() public {
         uint256 listingId = _createListingAsSeller();
         NotaReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
