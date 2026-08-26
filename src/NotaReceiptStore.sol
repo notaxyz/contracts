@@ -12,24 +12,29 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {FeeMath} from "./FeeMath.sol";
 import {PurchaseRefRegistry} from "./PurchaseRefRegistry.sol";
 
-/// @title RevealReceiptStore
-/// @notice Seller-first managed receipt contract for Reveal Protocol Receipt Mode.
+/// @title NotaReceiptStore
+/// @notice Seller-first managed receipt contract for Nota Receipt Mode.
 /// @dev Sellers create listings with opaque metadata commitments and an immutable receipt issuance
 ///      mode. `PublicFixedPrice` listings can be purchased directly at a public unit price, while
 ///      `SignedQuoteOnly` listings require a seller-authorized EIP-712 quote. In both modes,
-///      settlement completes immediately with an on-chain receipt record. Replay protection is
-///      enforced canonically through a shared `PurchaseRefRegistry`, while this contract keeps
-///      deterministic seller-side purchase reconciliation on-chain. Listing and receipt discovery
-///      is expected to be handled from events by indexers or seller systems.
-contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
+///      settlement completes immediately and emits `ReceiptPurchasedV2`, which is the receipt: no
+///      per-receipt storage is written. Replay protection is enforced canonically through a shared
+///      `PurchaseRefRegistry`. Listing and receipt discovery is expected to be handled from events
+///      by indexers or seller systems; `purchaseRef` is an indexed topic so reconciliation works
+///      from a plain `eth_getLogs` filter as well.
+contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // -------------------------------------------------------------------------
     // Constants
     // -------------------------------------------------------------------------
 
-    string public constant EIP712_NAME = "RevealReceiptStore";
-    string public constant EIP712_VERSION = "1";
+    string public constant EIP712_NAME = "NotaReceiptStore";
+    /// @dev Bumped to "2" for the storage-free receipt build. The domain separator already
+    ///      differs per chain via `chainId` and `verifyingContract`, so this is a labelling
+    ///      change rather than a replay barrier: it stops a v1 signing config from being pointed
+    ///      at a v2 deployment and silently producing a digest the contract will reject.
+    string public constant EIP712_VERSION = "2";
     /// @dev 50 bps = 0.5%.
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 50;
     /// @dev 450 bps = 4.5%. Combined with the protocol fee cap, v1 fees cannot exceed 5%.
@@ -41,7 +46,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     uint64 public constant MAX_QUOTE_TTL = 24 hours;
     uint256 public constant MAX_LISTINGS_PER_SELLER = 500;
     uint256 public constant MAX_QUOTE_SIGNERS_PER_LISTING = 3;
-    string internal constant PURCHASE_REF_HASH_DOMAIN = "zkReveal.purchaseRef.receipt.v1";
+    string internal constant PURCHASE_REF_HASH_DOMAIN = "nota.purchaseRef.receipt.v1";
     uint256 internal constant MAX_RAW_PURCHASE_REF_LENGTH = 128;
     bytes32 public constant SIGNED_RECEIPT_QUOTE_TYPEHASH = keccak256(
         "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)"
@@ -90,18 +95,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         uint256 unitPrice;
         bool active;
         ListingMode mode;
-    }
-
-    /// @dev Receipt Mode proof-of-payment record. Fulfillment meaning remains off-chain in seller
-    ///      systems. `purchaseRef` is the submitted `bytes32` hash; raw reference and nonce data
-    ///      remain off-chain. Receipt discovery is expected to come from events or indexers.
-    struct Receipt {
-        uint256 listingId;
-        address seller;
-        address buyer;
-        uint256 amount;
-        bytes32 purchaseRef;
-        uint64 issuedAt;
     }
 
     /// @notice Seller-authorized EIP-712 quote for a receipt purchase, with optional buyer binding.
@@ -173,10 +166,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     uint256 public nextListingId = 1;
+    /// @dev Monotonic receipt identifier. Receipts themselves are not stored on-chain: the
+    ///      `ReceiptPurchasedV2` event is the record, and `purchaseRef` replay protection lives in
+    ///      `PURCHASE_REF_REGISTRY`. This counter only keeps event ids unique and ordered.
     uint256 public nextReceiptId = 1;
 
     mapping(uint256 => Listing) public listings;
-    mapping(uint256 => Receipt) public receipts;
     /// @dev Enforces `MAX_LISTINGS_PER_SELLER`. Listing discovery is expected to come from
     ///      `ListingCreated` events or indexers, not on-chain enumeration.
     mapping(address seller => uint256 count) public listingCountBySeller;
@@ -186,11 +181,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     mapping(uint256 listingId => mapping(address signer => bool)) public authorizedQuoteSigners;
     /// @dev Number of currently authorized quote signers for each listing.
     mapping(uint256 listingId => uint256 count) public authorizedQuoteSignerCount;
-    /// @dev Deterministic seller-scoped reconciliation helper for `purchaseRef` hashes derived
-    ///      from off-chain `(rawPurchaseRef, purchaseRefNonce)` bundles. Canonical replay protection lives in
-    ///      `PURCHASE_REF_REGISTRY`; this mapping is retained only for seller and indexer receipt
-    ///      lookup after settlement and returns 0 if no matching receipt has been recorded here.
-    mapping(address => mapping(bytes32 => uint256)) public receiptIdBySellerAndPurchaseRef;
 
     bool public listingCreationPaused;
     bool public purchasesPaused;
@@ -210,12 +200,22 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     event ListingStatusChanged(uint256 indexed listingId, address indexed seller, bool active);
 
-    event ReceiptPurchased(
-        uint256 indexed receiptId,
+    /// @dev `purchaseRef` is indexed so a plain `eth_getLogs` filter can resolve a purchase
+    ///      reference to its settlement without an indexer. That lookup is the reconciliation
+    ///      path, and it is why `purchaseRef` takes one of the three topic slots ahead of
+    ///      `receiptId`: nobody searches for a receipt id they do not already have.
+    ///
+    ///      The `V2` suffix is load-bearing. Indexedness is not part of an event signature, so
+    ///      keeping the v1 name would have produced an identical `topic0` with a different topic
+    ///      layout to the live v1 deployment -- an indexer matching on `topic0` alone would decode
+    ///      a seller address as a receipt id and never raise an error. A distinct name makes the
+    ///      two impossible to confuse without anyone having to read documentation.
+    event ReceiptPurchasedV2(
+        uint256 receiptId,
         address indexed seller,
         address indexed buyer,
         uint256 listingId,
-        bytes32 purchaseRef,
+        bytes32 indexed purchaseRef,
         uint256 amount,
         bytes32 metadataHash
     );
@@ -242,7 +242,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     error ListingNotFound();
-    error ReceiptNotFound();
     error NotListingSeller();
     error ListingInactive();
     error ListingRequiresSignedQuote();
@@ -268,11 +267,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     modifier listingExists(uint256 listingId) {
         _listingExists(listingId);
-        _;
-    }
-
-    modifier receiptExists(uint256 receiptId) {
-        _receiptExists(receiptId);
         _;
     }
 
@@ -415,10 +409,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         if (listings[listingId].seller == address(0)) revert ListingNotFound();
     }
 
-    function _receiptExists(uint256 receiptId) internal view {
-        if (receipts[receiptId].seller == address(0)) revert ReceiptNotFound();
-    }
-
     function _onlyListingSeller(uint256 listingId) internal view {
         if (listings[listingId].seller != msg.sender) revert NotListingSeller();
     }
@@ -501,19 +491,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
         receiptId = nextReceiptId++;
 
-        Receipt storage receipt = receipts[receiptId];
-        receipt.listingId = listingId;
-        receipt.seller = seller;
-        receipt.buyer = receiptBuyer;
-        receipt.amount = amount;
-        receipt.purchaseRef = purchaseRef;
-        receipt.issuedAt = uint64(block.timestamp);
-
-        receiptIdBySellerAndPurchaseRef[seller][purchaseRef] = receiptId;
-
         _distributeReceiptPurchaseProceeds(receiptId, listingId, seller, rake);
 
-        emit ReceiptPurchased(receiptId, seller, receiptBuyer, listingId, purchaseRef, amount, metadataHash);
+        emit ReceiptPurchasedV2(receiptId, seller, receiptBuyer, listingId, purchaseRef, amount, metadataHash);
     }
 
     // -------------------------------------------------------------------------
@@ -655,10 +635,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      including `listingId` in the hash.`listingId` is accepted by `hashPurchaseRef` only to validate seller ownership;
     ///       it is not part of the purchaseRef preimage.  Use `purchaseSignedReceipt` instead for buyer-bound payment links,
     ///      private checkout flows, dynamic pricing, or integrator fees. This direct path commits no
-    ///      off-chain checkout metadata, so `ReceiptPurchased` is emitted with
+    ///      off-chain checkout metadata, so `ReceiptPurchasedV2` is emitted with
     ///      `metadataHash = bytes32(0)`. Payment settles
     ///      immediately and fulfillment remains entirely off-chain in seller systems. Receipt
-    ///      discovery is expected to be handled from `ReceiptPurchased` events or indexers.
+    ///      discovery is expected to be handled from `ReceiptPurchasedV2` events or indexers.
     function purchaseReceipt(uint256 listingId, bytes32 purchaseRef, uint256 amount)
         external
         nonReentrant
@@ -705,7 +685,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      also include an optional integrator fee paid from the
     ///      gross amount. `quote.metadataHash` must be non-zero and commits to the seller-authorized
     ///      canonical checkout metadata (keccak256 over its JCS-canonicalized JSON); the contract
-    ///      only sees/stores that `bytes32` and emits it in `ReceiptPurchased`.
+    ///      only sees/stores that `bytes32` and emits it in `ReceiptPurchasedV2`.
     function purchaseSignedReceipt(SignedReceiptQuote calldata quote, bytes calldata sellerSignature)
         external
         nonReentrant
@@ -744,8 +724,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      the buyer does not necessarily see the nonce directly. `purchaseRefNonce` must remain
     ///      off-chain and must not be added to `SignedReceiptQuote` or settlement calldata. Only
     ///      the resulting `bytes32 purchaseRef` hash is submitted on-chain.
-    ///      The hash is seller-scoped by the Reveal Protocol domain string
-    ///      `zkReveal.purchaseRef.receipt.v1`, `block.chainid`, the settlement token, `seller`,
+    ///      The hash is seller-scoped by the Nota domain string
+    ///      `nota.purchaseRef.receipt.v1`, `block.chainid`, the settlement token, `seller`,
     ///      `rawPurchaseRef`, and `purchaseRefNonce`, so `rawPurchaseRef` does not need to include
     ///      seller, chain, token, or domain data itself. `listingId` is validated only to confirm
     ///      that `seller` owns the listing; it is intentionally not included in the hash. Reuse
@@ -904,17 +884,5 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     {
         Listing storage listing = listings[listingId];
         return signer == listing.seller || authorizedQuoteSigners[listingId][signer];
-    }
-
-    function getReceipt(uint256 receiptId) external view receiptExists(receiptId) returns (Receipt memory) {
-        return receipts[receiptId];
-    }
-
-    /// @notice Return the locally recorded receipt ID for a seller-scoped lookup key, or 0 if absent.
-    /// @dev Sellers, bots, integrators, and indexers can recompute the canonical hash from the
-    ///      off-chain `(rawPurchaseRef, purchaseRefNonce)` bundle via `hashPurchaseRef` and use
-    ///      this getter as a deterministic on-chain reconciliation helper for the matching receipt.
-    function getReceiptIdBySellerAndPurchaseRef(address seller, bytes32 purchaseRef) external view returns (uint256) {
-        return receiptIdBySellerAndPurchaseRef[seller][purchaseRef];
     }
 }

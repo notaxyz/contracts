@@ -6,7 +6,7 @@ import {console2} from "forge-std/console2.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
-import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
+import {NotaReceiptStore} from "../src/NotaReceiptStore.sol";
 
 /// @dev Measures execution gas for the two buyer-facing purchase paths against real mainnet
 ///      USDC on a forked L2. Run with an RPC for the target chain; see the concrete
@@ -27,7 +27,7 @@ abstract contract GasBenchmarkFork is Test {
 
     IERC20 internal usdc;
     PurchaseRefRegistry internal registry;
-    RevealReceiptStore internal store;
+    NotaReceiptStore internal store;
 
     address internal seller;
     address internal buyer = address(0xB0B);
@@ -64,7 +64,7 @@ abstract contract GasBenchmarkFork is Test {
         seller = vm.addr(SELLER_PK);
 
         registry = new PurchaseRefRegistry(address(this));
-        store = new RevealReceiptStore(address(usdc), address(registry), feeRecipient, protocolFeeBps, owner);
+        store = new NotaReceiptStore(address(usdc), address(registry), feeRecipient, protocolFeeBps, owner);
         registry.setConsumerAuthorization(address(store), true);
 
         deal(address(usdc), buyer, 1_000_000_000, true);
@@ -75,7 +75,7 @@ abstract contract GasBenchmarkFork is Test {
         }
 
         vm.prank(seller);
-        store.createListing(LISTING_HASH, PRICE, RevealReceiptStore.ListingMode.PublicFixedPrice);
+        store.createListing(LISTING_HASH, PRICE, NotaReceiptStore.ListingMode.PublicFixedPrice);
     }
 
     /// @dev Reset every account the purchase touches to cold so the measurement reflects a real
@@ -102,9 +102,9 @@ abstract contract GasBenchmarkFork is Test {
     function _quote(bytes32 ref, address integratorRecipient, uint256 integratorFee)
         internal
         view
-        returns (RevealReceiptStore.SignedReceiptQuote memory quote)
+        returns (NotaReceiptStore.SignedReceiptQuote memory quote)
     {
-        quote = RevealReceiptStore.SignedReceiptQuote({
+        quote = NotaReceiptStore.SignedReceiptQuote({
             listingId: 1,
             buyer: buyer,
             purchaseRef: ref,
@@ -117,7 +117,7 @@ abstract contract GasBenchmarkFork is Test {
         });
     }
 
-    function _sign(RevealReceiptStore.SignedReceiptQuote memory quote) internal view returns (bytes memory) {
+    function _sign(NotaReceiptStore.SignedReceiptQuote memory quote) internal view returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(SELLER_PK, store.hashSignedReceiptQuote(quote));
         return abi.encodePacked(r, s, v);
     }
@@ -151,7 +151,7 @@ abstract contract GasBenchmarkFork is Test {
     }
 
     function test_gas_purchaseSignedReceipt() public {
-        RevealReceiptStore.SignedReceiptQuote memory quote = _quote(keccak256("ref-signed"), address(0), 0);
+        NotaReceiptStore.SignedReceiptQuote memory quote = _quote(keccak256("ref-signed"), address(0), 0);
         bytes memory sig = _sign(quote);
         _approve(PRICE);
         _coolAll();
@@ -165,7 +165,7 @@ abstract contract GasBenchmarkFork is Test {
     }
 
     function test_gas_purchaseSignedReceipt_withIntegratorFee() public {
-        RevealReceiptStore.SignedReceiptQuote memory quote =
+        NotaReceiptStore.SignedReceiptQuote memory quote =
             _quote(keccak256("ref-signed-integrator"), integrator, 1_000_000);
         bytes memory sig = _sign(quote);
         _approve(PRICE);
@@ -193,7 +193,7 @@ abstract contract GasBenchmarkFork is Test {
         _coolAll();
         vm.prank(seller);
         uint256 g0 = gasleft();
-        store.createListing(keccak256("listing-2"), PRICE, RevealReceiptStore.ListingMode.PublicFixedPrice);
+        store.createListing(keccak256("listing-2"), PRICE, NotaReceiptStore.ListingMode.PublicFixedPrice);
         uint256 used = g0 - gasleft();
 
         _report("createListing", used);

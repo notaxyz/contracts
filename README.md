@@ -1,12 +1,12 @@
-# Reveal Protocol v1
+# Nota v1
 
-Reveal Protocol v1 is a minimal on-chain receipt and settlement layer for digital sellers.
+Nota v1 is a minimal on-chain receipt and settlement layer for digital sellers.
 
 Buyer pays.  
 Seller gets paid.  
 Your backend receives a verifiable on-chain purchase receipt.
 
-Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchased`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
+Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
 v1 is intentionally limited to Receipt Mode.
 
@@ -22,17 +22,18 @@ v1 is intentionally limited to Receipt Mode.
 
 - v1 does not act as a marketplace, escrow system, refund system, or delivery-verification protocol
 
-## Why "zk"?
+## Privacy Scope
 
 The current Receipt Mode contracts do not implement zero-knowledge proofs.
 
-The contracts focus on the first production primitive of zkReveal:
+The contracts focus on the first production primitive of Nota:
 
 ```text
 payment → settlement → on-chain receipt
 ```
 
-The "zk" name refers to the project’s longer-term direction, where future modules may introduce privacy-preserving verification, selective disclosure, encrypted delivery, or reveal mechanisms.
+Future modules may introduce privacy-preserving verification, selective disclosure, or encrypted
+delivery. None of that is present today.
 
 In the current contracts, privacy is limited to design choices such as:
 
@@ -45,23 +46,23 @@ This README describes the current smart contract system only. It should not be r
 
 ## Product Model
 
-Reveal Protocol v1 receipt mode has two immutable on-chain components:
+Nota v1 receipt mode has two immutable on-chain components:
 
 - `PurchaseRefRegistry` is the canonical replay-protection primitive. It consumes each
   protocol-scoped `purchaseRef` once and stores which authorized settlement contract or module
   consumed it. Random wallets cannot consume refs directly. The registry owner may authorize or
   deauthorize settlement modules for future use, but cannot delete or unconsume refs that have
   already been consumed.
-- `RevealReceiptStore` is the seller-facing receipt settlement contract. It manages listings,
+- `NotaReceiptStore` is the seller-facing receipt settlement contract. It manages listings,
   signatures, payment settlement, and receipt records.
 
-Current and future Reveal Protocol settlement contracts only share replay protection when they point to
+Current and future Nota settlement contracts only share replay protection when they point to
 the same `PurchaseRefRegistry`. Adding a future settlement module requires authorizing that module
 in the shared registry.
 
 ### Deployment Note
 
-`RevealReceiptStore` must be authorized as a `PurchaseRefRegistry` consumer before purchases can
+`NotaReceiptStore` must be authorized as a `PurchaseRefRegistry` consumer before purchases can
 settle. The deployment script handles this by deploying the registry with the deployer as temporary
 owner, authorizing the receipt store, and then transferring registry ownership to
 `PROTOCOL_OWNER`.
@@ -132,7 +133,7 @@ Seller Payment Link Mode fits inside the signed quote path and is the recommende
 3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
 4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
 5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a quote signer authorized for `quote.listingId` at purchase time.
-6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
+6. `ReceiptPurchasedV2` confirms payment, and the seller fulfills the order off-chain.
 
 Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery. `issuedAt` is the seller-declared quote issuance timestamp and part of the signed EIP-712 payload. A signed quote is valid only between `issuedAt` and `expiresAt`, and `expiresAt - issuedAt` must not exceed `MAX_QUOTE_TTL`.
 `metadataHash` must be non-zero and should commit to the readable off-chain payment-link or checkout metadata the seller intends to authorize.
@@ -153,7 +154,7 @@ This lets marketplaces, bots, checkout frontends, dashboards, and other seller t
 
 A listing-authorized quote signer is trusted to set the full signed quote intent for that listing, including `amount`, `metadataHash`, `buyer`, `purchaseRef`, and optional integrator fee fields. The contract enforces protocol fee caps and quote validity, but it does not know whether a delegated signer chose the seller's intended price, metadata, buyer binding, purchase reference, or integrator fee recipient.
 
-On purchase, the Reveal Protocol pays:
+On purchase, the Nota pays:
 
 1. protocol fee
 2. integrator fee, if present
@@ -167,8 +168,8 @@ TypeScript signing shape:
 
 ```ts
 const domain = {
-  name: "RevealReceiptStore",
-  version: "1",
+  name: "NotaReceiptStore",
+  version: "2",
   chainId,
   verifyingContract: receiptStoreAddress,
 };
@@ -257,13 +258,13 @@ Use JSON Canonicalization Scheme (JCS)-style serialization (stable key order, no
 hashing. **Never** hash raw `JSON.stringify()` output unless the runtime guarantees deterministic key
 ordering and value normalization.
 
-Recommended v1 shape (`schema: "zkreveal.checkout.metadata.v1"`):
+Recommended v1 shape (`schema: "nota.checkout.metadata.v1"`):
 
 ```json
 {
-  "schema": "zkreveal.checkout.metadata.v1",
+  "schema": "nota.checkout.metadata.v1",
   "protocol": {
-    "name": "Reveal Protocol",
+    "name": "Nota",
     "version": "1",
     "chainId": 421614,
     "receiptStore": "0x...",
@@ -317,7 +318,7 @@ metadata lives in the seller backend, merchant API, bot session, or dashboard.
 
 ### Purchase References
 
-In Receipt Mode, the Reveal Protocol separates the human-readable off-chain order reference from the
+In Receipt Mode, the Nota separates the human-readable off-chain order reference from the
 on-chain receipt identifier.
 
 - `rawPurchaseRef` is generated by the seller, bot, frontend, or backend.
@@ -325,15 +326,16 @@ on-chain receipt identifier.
 - `purchaseRef` is the protocol-scoped `bytes32` hash submitted to settlement contracts.
 - Canonical replay protection is enforced through `PurchaseRefRegistry.consume(purchaseRef)`, which
   only authorized settlement modules may call.
-- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]` remains in `RevealReceiptStore` only as
-  a deterministic reconciliation helper for that store's own receipts.
-- The canonical hash is scoped by the Reveal Protocol domain string
-  `zkReveal.purchaseRef.receipt.v1`, `chainId`, settlement token
+- `NotaReceiptStore` keeps no per-receipt storage. The `ReceiptPurchasedV2` event is the receipt
+  record, and `purchaseRef` is an indexed topic, so resolving a purchase reference to its
+  settlement is an `eth_getLogs` filter — no indexer required.
+- The canonical hash is scoped by the Nota domain string
+  `nota.purchaseRef.receipt.v1`, `chainId`, settlement token
   address, seller address, the raw purchase reference, and the secret purchase ref nonce.
 
 ```solidity
 purchaseRef = keccak256(abi.encode(
-    "zkReveal.purchaseRef.receipt.v1",
+    "nota.purchaseRef.receipt.v1",
     block.chainid,
     address(settlementToken),
     seller,
@@ -350,7 +352,7 @@ external system, not describe the buyer or purchased content.
 It is not included in the final hash.
 
 Because replay protection is enforced on the final `purchaseRef` hash through a shared
-`PurchaseRefRegistry`, the same `purchaseRef` cannot be reused across current or future Reveal Protocol
+`PurchaseRefRegistry`, the same `purchaseRef` cannot be reused across current or future Nota
 settlement contracts that share that registry. This also prevents accidental replay across
 different listings for the same seller raw order reference. Sellers should still treat each
 `rawPurchaseRef` as a unique operational order ID and avoid reusing it across orders.
@@ -376,7 +378,7 @@ both a human/business `rawPurchaseRef` and a secret `bytes32 purchaseRefNonce`:
 
 ```
 purchaseRef = keccak256(abi.encode(
-    "zkReveal.purchaseRef.receipt.v1", chainId, settlementToken, seller, rawPurchaseRef, purchaseRefNonce));
+    "nota.purchaseRef.receipt.v1", chainId, settlementToken, seller, rawPurchaseRef, purchaseRefNonce));
 ```
 
 - `rawPurchaseRef` — the business identifier. Recommended canonical form `<namespace>_<context>_<random>`
@@ -420,7 +422,7 @@ delivery-verification system.
 
 ## Source of Truth
 
-`ListingCreated` and `ReceiptPurchased` are the source-of-truth events for listing and receipt
+`ListingCreated` and `ReceiptPurchasedV2` are the source-of-truth events for listing and receipt
 discovery by seller bots, backends, dashboards, and indexers.
 Signed quote purchases emit the signed `metadataHash`; direct fixed-price purchases emit `bytes32(0)`.
 `SellerPaid` records the seller net amount after protocol and integrator fees. `ProtocolFeePaid`
@@ -437,12 +439,13 @@ If seller systems also need product context, they should resolve it off-chain fr
 The contract also stores:
 
 - `PurchaseRefRegistry.consumptions[purchaseRef]` as the canonical replay-protection record
-- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`
-- `receipts[receiptId]`
 - `listingCountBySeller[seller]` only to enforce `MAX_LISTINGS_PER_SELLER`
 
-`receiptIdBySellerAndPurchaseRef` is not the replay-protection source of truth. It is a local
-lookup helper for seller and indexer reconciliation after settlement.
+Receipts themselves are not stored on-chain. Writing the six-field receipt struct plus a
+seller-scoped lookup mapping cost roughly 155k gas per purchase and nothing on-chain read it:
+replay protection lives in `PurchaseRefRegistry`, and discovery comes from events. The
+`ReceiptPurchasedV2` event carries every field the struct held; `issuedAt` was always
+`block.timestamp`, which the log's own block supplies.
 
 ## Fee Model
 
@@ -473,7 +476,7 @@ There is no dynamic fee mutation in v1.
 
 ## Safety Controls
 
-`RevealReceiptStore` is owned and uses `Ownable2Step` for admin transfers.
+`NotaReceiptStore` is owned and uses `Ownable2Step` for admin transfers.
 
 The owner can independently pause:
 
@@ -497,7 +500,7 @@ Integration guide:
 Core contract:
 
 - `src/PurchaseRefRegistry.sol`
-- `src/RevealReceiptStore.sol`
+- `src/NotaReceiptStore.sol`
 
 Key functions:
 
@@ -515,14 +518,13 @@ Key functions:
 - `validateSignedReceiptPurchase`
 - `hashSignedReceiptQuote`
 - `isQuoteSignerAuthorized`
-- `getReceiptIdBySellerAndPurchaseRef`
 
 Key events:
 
 - `ListingCreated`
 - `ListingStatusChanged`
 - `QuoteSignerAuthorizationChanged`
-- `ReceiptPurchased`
+- `ReceiptPurchasedV2`
 - `SellerPaid`
 - `ProtocolFeePaid`
 - `IntegratorFeePaid`
@@ -542,7 +544,7 @@ forge test --offline --suppress-successful-traces
 
 ## Deployment
 
-The v1 deploy script deploys `PurchaseRefRegistry` first and then deploys `RevealReceiptStore`
+The v1 deploy script deploys `PurchaseRefRegistry` first and then deploys `NotaReceiptStore`
 with that registry address wired into the constructor.
 
 Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
@@ -579,7 +581,7 @@ The deploy output logs both:
 - `PurchaseRefRegistry`
 - `ReceiptStore`
 
-If a future Reveal Protocol settlement contract must share replay protection with an existing deployment,
+If a future Nota settlement contract must share replay protection with an existing deployment,
 it should be deployed against the same `PurchaseRefRegistry` address.
 
 Typical Arbitrum One mainnet flow (solo deployer, deployer == protocol owner):
@@ -624,6 +626,6 @@ After deployment, record:
 
 ## Scope
 
-Reveal Protocol v1 is intentionally focused on receipt-mode settlement and off-chain fulfillment.
+Nota v1 is intentionally focused on receipt-mode settlement and off-chain fulfillment.
 
 Future modules should be documented in their own specifications and repositories when they are designed or implemented.

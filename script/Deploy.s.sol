@@ -5,7 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
-import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
+import {NotaReceiptStore} from "../src/NotaReceiptStore.sol";
 
 contract Deploy is Script {
     uint256 internal constant MAX_PROTOCOL_FEE_BPS = 50;
@@ -50,7 +50,7 @@ contract Deploy is Script {
         config.protocolFeeBps = vm.envUint("PROTOCOL_FEE_BPS");
     }
 
-    function run() external returns (PurchaseRefRegistry purchaseRefRegistry, RevealReceiptStore receiptStore) {
+    function run() external returns (PurchaseRefRegistry purchaseRefRegistry, NotaReceiptStore receiptStore) {
         DeployConfig memory config = _readConfig();
         uint256 pk = config.pk;
         address deployer = vm.addr(pk);
@@ -81,14 +81,14 @@ contract Deploy is Script {
         // forge-lint: disable-next-line(unsafe-typecast)
         uint16 protocolFeeBps = uint16(protocolFeeBpsRaw);
 
-        console2.log("=== zkReveal ReceiptStore Deployment ===");
+        console2.log("=== Nota ReceiptStore Deployment ===");
         console2.log("ChainId:", block.chainid);
         console2.log("SettlementTokenDecimals:", settlementTokenDecimals);
         console2.log("ExpectedProtocolFeeBps:", expectedProtocolFeeBps);
 
         vm.startBroadcast(pk);
         purchaseRefRegistry = new PurchaseRefRegistry(deployer);
-        receiptStore = new RevealReceiptStore(
+        receiptStore = new NotaReceiptStore(
             settlementToken, address(purchaseRefRegistry), feeRecipient, protocolFeeBps, protocolOwner
         );
         purchaseRefRegistry.setConsumerAuthorization(address(receiptStore), true);

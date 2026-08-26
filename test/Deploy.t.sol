@@ -6,7 +6,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {Deploy} from "../script/Deploy.s.sol";
 import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
-import {RevealReceiptStore} from "../src/RevealReceiptStore.sol";
+import {NotaReceiptStore} from "../src/NotaReceiptStore.sol";
 
 contract DeployMockUSDC is ERC20 {
     constructor() ERC20("Mock USDC", "USDC") {}
@@ -79,7 +79,7 @@ contract DeployTest is Test {
         vm.chainId(BASE_MAINNET_CHAIN_ID);
         _configure(BASE_MAINNET_NATIVE_USDC, 0, address(0));
 
-        (PurchaseRefRegistry registry, RevealReceiptStore receiptStore) = deployScript.run();
+        (PurchaseRefRegistry registry, NotaReceiptStore receiptStore) = deployScript.run();
 
         // The commitment an integrator can read off-chain: no fee, and no destination for one.
         assertEq(receiptStore.PROTOCOL_FEE_BPS(), 0);
@@ -117,7 +117,7 @@ contract DeployTest is Test {
         vm.chainId(ARBITRUM_ONE_CHAIN_ID);
         _configure(ARBITRUM_ONE_NATIVE_USDC, 50, address(0xFEE));
 
-        (, RevealReceiptStore receiptStore) = deployScript.run();
+        (, NotaReceiptStore receiptStore) = deployScript.run();
 
         assertEq(receiptStore.PROTOCOL_FEE_BPS(), 50);
         assertEq(receiptStore.FEE_RECIPIENT(), address(0xFEE));
@@ -137,7 +137,7 @@ contract DeployTest is Test {
         address testUsdc = address(new DeployMockUSDC());
         _configure(testUsdc, 50, address(0xFEE));
 
-        (, RevealReceiptStore receiptStore) = deployScript.run();
+        (, NotaReceiptStore receiptStore) = deployScript.run();
 
         assertEq(receiptStore.PROTOCOL_FEE_BPS(), 50);
         assertEq(address(receiptStore.SETTLEMENT_TOKEN()), testUsdc);

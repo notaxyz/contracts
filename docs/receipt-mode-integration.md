@@ -4,14 +4,15 @@ For production checkout and payment-link flows, prefer signed quotes.
 
 ## Architecture
 
-Reveal Protocol receipt mode has two immutable contracts:
+Nota receipt mode has two immutable contracts:
 
 - `PurchaseRefRegistry` is the canonical replay-protection layer. It consumes a `purchaseRef`
   once globally for every settlement contract that shares the registry.
-- `RevealReceiptStore` handles listings, signatures, settlement, and receipt records.
+- `NotaReceiptStore` handles listings, signatures, and settlement.
 
-`receiptIdBySellerAndPurchaseRef[seller][purchaseRef]` inside `RevealReceiptStore` is only a local
-reconciliation helper. It is not the replay-protection source of truth.
+`NotaReceiptStore` stores no receipt records. Settlement emits `ReceiptPurchasedV2`, which is the
+receipt. `seller`, `buyer`, and `purchaseRef` are indexed, so reconciling a purchase reference to
+its settlement is a direct `eth_getLogs` filter on the `purchaseRef` topic.
 
 ## Purchase Modes
 
@@ -75,7 +76,7 @@ validation path as `purchaseSignedReceipt` without moving funds or creating a re
 Use `previewSignedReceiptPurchase(quote)` only for fee math. It does not verify signature, buyer
 match, quote expiry, listing status, or replay status.
 
-Listing and receipt discovery should be handled from `ListingCreated` and `ReceiptPurchased`
+Listing and receipt discovery should be handled from `ListingCreated` and `ReceiptPurchasedV2`
 events or by an indexer, not by on-chain enumeration.
 
 ## Hashes, Metadata, and Privacy
@@ -105,13 +106,13 @@ Use JSON Canonicalization Scheme (JCS)-style serialization (stable key order, no
 hashing. **Never** hash raw `JSON.stringify()` output unless the runtime guarantees deterministic key
 ordering and value normalization.
 
-Recommended v1 shape (`schema: "zkreveal.checkout.metadata.v1"`):
+Recommended v1 shape (`schema: "nota.checkout.metadata.v1"`):
 
 ```json
 {
-  "schema": "zkreveal.checkout.metadata.v1",
+  "schema": "nota.checkout.metadata.v1",
   "protocol": {
-    "name": "Reveal Protocol",
+    "name": "Nota",
     "version": "1",
     "chainId": 421614,
     "receiptStore": "0x...",
@@ -166,7 +167,7 @@ metadata lives in the seller backend, merchant API, bot session, or dashboard.
 ### Purchase Reference Scoping
 
 - canonical replay protection is enforced through `PurchaseRefRegistry.consume(purchaseRef)`
-- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]` remains only as a local receipt lookup
+- receipts are not stored on-chain; `ReceiptPurchasedV2` is the record
 - the canonical helper is `hashPurchaseRef(seller, listingId, rawPurchaseRef, purchaseRefNonce)`
 - the canonical hash includes the domain string, `block.chainid`, settlement token address,
   seller, the raw purchase reference, and the secret `purchaseRefNonce`
@@ -181,7 +182,7 @@ cannot be brute-forced into the on-chain `purchaseRef` without the nonce.
 It is not part of the final hash.
 
 Because replay protection is enforced on the final hash through a shared `PurchaseRefRegistry`,
-the same `purchaseRef` cannot be reused across current or future Reveal Protocol settlement contracts
+the same `purchaseRef` cannot be reused across current or future Nota settlement contracts
 that share that registry. This also prevents accidental replay across different listings for the
 same seller raw order reference. Sellers should still treat every raw reference as a unique
 operational order ID and avoid reusing it across orders.
@@ -210,9 +211,9 @@ contract only checks that `rawPurchaseRef` is 1..128 bytes, since at settlement 
 
 ## Deployment Integration
 
-Deploy `PurchaseRefRegistry` before `RevealReceiptStore`.
+Deploy `PurchaseRefRegistry` before `NotaReceiptStore`.
 
-`RevealReceiptStore` constructor arguments now include the registry address. To preserve
+`NotaReceiptStore` constructor arguments now include the registry address. To preserve
 protocol-level replay protection across future settlement contracts, deploy those contracts
 against the same `PurchaseRefRegistry` address.
 
