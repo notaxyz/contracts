@@ -82,6 +82,7 @@ contract RevealReceiptStoreTest is Test {
     address buyer2 = address(0xCAFE);
     address attacker;
     address feeRecipient = address(0xFEE);
+    address internal constant INTEGRATOR = address(0x1A7E);
 
     bytes32 listingHash = keccak256("listing-1");
     bytes32 listingHash2 = keccak256("listing-2");
@@ -1505,6 +1506,62 @@ contract RevealReceiptStoreTest is Test {
         assertEq(usdc.balanceOf(integrator), integratorBalanceBefore + integratorFeeAmount);
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - protocolFee - integratorFeeAmount));
         assertEq(usdc.balanceOf(address(feeStore)), 0);
+    }
+
+    /// @dev Scans recorded logs for the zero-protocol-fee path: asserts no ProtocolFeePaid was
+    ///      emitted and no settlement-token leg paid the protocol recipient. Returns the number
+    ///      of settlement-token Transfer events seen.
+    function _assertNoProtocolFeeLeg(address protocolRecipient) internal view returns (uint256 settlementTransfers) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 protocolFeeTopic = keccak256("ProtocolFeePaid(uint256,uint256,address,uint256)");
+        bytes32 transferTopic = keccak256("Transfer(address,address,uint256)");
+
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length == 0) continue;
+            assertTrue(logs[i].topics[0] != protocolFeeTopic);
+            if (logs[i].emitter == address(usdc) && logs[i].topics[0] == transferTopic) {
+                settlementTransfers++;
+                assertTrue(address(uint160(uint256(logs[i].topics[2]))) != protocolRecipient);
+            }
+        }
+    }
+
+    function test_PurchaseSignedReceipt_ZeroProtocolFeeSkipsTransferAndEvent() public {
+        RevealReceiptStore zeroFeeStore = _deployStore(0);
+        uint256 listingId = _createListingAs(zeroFeeStore, seller, listingHash);
+        uint256 integratorFeeAmount = quotedAmount * 200 / 10_000;
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+
+        assertEq(zeroFeeStore.PROTOCOL_FEE_BPS(), 0);
+
+        {
+            RevealReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuoteWithIntegrator(
+                listingId,
+                buyer,
+                purchaseRef,
+                quotedAmount,
+                INTEGRATOR,
+                integratorFeeAmount,
+                uint64(block.timestamp + 1 days)
+            );
+            bytes memory signature = _signSignedReceiptQuote(zeroFeeStore, SELLER_PK, quote);
+
+            vm.startPrank(buyer);
+            usdc.approve(address(zeroFeeStore), quotedAmount);
+            vm.recordLogs();
+            zeroFeeStore.purchaseSignedReceipt(quote, signature);
+            vm.stopPrank();
+        }
+
+        // buyer -> store, store -> integrator, store -> seller. No fourth leg for the protocol.
+        assertEq(_assertNoProtocolFeeLeg(feeRecipient), 3);
+
+        // sellerNet == gross - integratorFee, with nothing withheld for the protocol.
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore);
+        assertEq(usdc.balanceOf(INTEGRATOR), integratorFeeAmount);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (quotedAmount - integratorFeeAmount));
+        assertEq(usdc.balanceOf(address(zeroFeeStore)), 0);
     }
 
     function test_PurchaseSignedReceipt_MaxProtocolAndMaxIntegratorFeeSettles() public {
