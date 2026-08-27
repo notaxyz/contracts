@@ -1,0 +1,33 @@
+{
+  "network": "base",
+  "chainId": 8453,
+  "deployedAt": "2026-08-27T20:19:17Z",
+  "broadcastTimestampMs": 1787862009325,
+  "gitCommit": "bb6935e",
+  "deployer": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
+  "protocolOwner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
+  "settlementToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "settlementTokenSymbol": "USDC",
+  "feeRecipient": "0x0000000000000000000000000000000000000000",
+  "protocolFeeBps": 0,
+  "purchaseRefRegistry": {
+    "address": "0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991",
+    "deployTxHash": "0x8d1389f18a117495c27b9f93d1c9a3cd9220c4884488b69233f76faf02a69612",
+    "deployBlock": 50536305,
+    "owner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
+    "pendingOwner": "0x0000000000000000000000000000000000000000",
+    "basescanVerified": true
+  },
+  "notaReceiptStore": {
+    "address": "0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88",
+    "deployTxHash": "0x78301d0cffc614a1ad591275a96fbdd413fddb73568d57fe6bda3a37e4055266",
+    "deployBlock": 50536305,
+    "owner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
+    "authorizedInPurchaseRefRegistry": true,
+    "basescanVerified": true
+  },
+  "registryAuthorization": {
+    "txHash": "0x251a63ff725f679b951bb194dfc0c5ca78574e503c0a7a417ca005de89c4f8db",
+    "block": 50536305
+  }
+}
