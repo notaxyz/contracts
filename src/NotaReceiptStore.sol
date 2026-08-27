@@ -438,6 +438,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         view
         returns (bytes32)
     {
+        // forge-lint: disable-start(asm-keccak256)
         return keccak256(
             bytes.concat(
                 abi.encode(
@@ -460,6 +461,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
                 )
             )
         );
+        // forge-lint: disable-end(asm-keccak256)
     }
 
     function _listingExists(uint256 listingId) internal view {

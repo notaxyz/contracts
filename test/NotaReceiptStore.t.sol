@@ -874,6 +874,31 @@ contract NotaReceiptStoreTest is Test {
         );
     }
 
+    function test_ReadmeSignedReceiptQuoteType_MatchesContractTypehash() public {
+        string memory path = "README.md";
+        string memory marker = "The signed EIP-712 type is:";
+        string memory readmeTypeString;
+        bool found;
+
+        // forge-lint: disable-start(unsafe-cheatcode)
+        vm.closeFile(path);
+        for (uint256 i; i < 400; ++i) {
+            string memory line = vm.readLine(path);
+            if (keccak256(bytes(line)) == keccak256(bytes(marker))) {
+                assertEq(vm.readLine(path), "");
+                assertEq(vm.readLine(path), "```text");
+                readmeTypeString = vm.readLine(path);
+                found = true;
+                break;
+            }
+        }
+        vm.closeFile(path);
+        // forge-lint: disable-end(unsafe-cheatcode)
+
+        assertTrue(found, "README EIP-712 type section missing");
+        assertEq(keccak256(bytes(readmeTypeString)), store.SIGNED_RECEIPT_QUOTE_TYPEHASH());
+    }
+
     function test_FeeCaps_AreExpected() public view {
         assertEq(store.MAX_PROTOCOL_FEE_BPS(), 50);
         assertEq(store.MAX_INTEGRATOR_FEE_BPS(), 450);

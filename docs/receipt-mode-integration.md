@@ -54,6 +54,7 @@ The EIP-712 quote binds:
 - amount
 - purchase reference
 - metadata hash
+- agent ID
 - settlement token
 - purchaseRefRegistry
 - issuedAt

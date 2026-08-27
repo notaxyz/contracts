@@ -101,7 +101,7 @@ For production checkout/payment-link flows, prefer signed quotes.
 - Recommended default for production checkout/payment-link flows.
 - Works for both listing modes: required for `SignedQuoteOnly`, and also supported on `PublicFixedPrice` listings.
 - Uses a seller-authorized EIP-712 quote.
-- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, settlementToken, purchaseRefRegistry, expiry, chain, and contract.
+- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, agentId, settlementToken, purchaseRefRegistry, expiry, chain, and contract.
 - `buyer` is optional: a non-zero `buyer` must match `msg.sender`, so another wallet cannot redeem the same quote; a zero `buyer` leaves the quote unbound so any wallet may submit and pay (single-use `purchaseRef` still prevents double-redemption).
 - Supports dynamic pricing and optional integrator fees.
 - Use this for Telegram bot flows, seller-issued order links, private links, custom pricing, and partner or integrator checkouts.
@@ -123,7 +123,7 @@ Seller Payment Link Mode fits inside the signed quote path and is the recommende
 
 1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the protocol-scoped `purchaseRef` hash.
 2. Seller optionally authorizes a backend or service key for the listing with `setListingQuoteSigner(listingId, signer, true)`.
-3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, `agentId`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
 4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)`. Pass `address(0)` for `claimedSigner` when the listing seller signed; pass the delegate's address when an authorized quote signer signed.
 5. The contract checks that `claimedSigner` is the seller or authorized for `quote.listingId`, then verifies the EIP-712 signature against it. Both checks must pass.
 6. `ReceiptPurchasedV2` confirms payment, and the seller fulfills the order off-chain.
@@ -192,6 +192,7 @@ const message = {
   purchaseRef,
   amount,
   metadataHash, // hash of seller-defined readable checkout metadata
+  agentId: "0x0000000000000000000000000000000000000000000000000000000000000000", // zero means unspecified
   settlementToken,
   purchaseRefRegistry,
   integratorFeeRecipient, // zero address when no integrator fee is used
@@ -208,7 +209,7 @@ The `seller` field in typed data is always the listing seller address, even when
 The signed EIP-712 type is:
 
 ```text
-SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)
+SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,bytes32 agentId,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)
 ```
 
 ## Quote Signer Security
