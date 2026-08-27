@@ -6,14 +6,21 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 const contracts = [
   {
-    artifact: "out/RevealReceiptStore.sol/RevealReceiptStore.json",
-    abi: "abis/RevealReceiptStore.json",
-    exportName: "revealReceiptStoreAbi"
+    artifact: "out/NotaReceiptStore.sol/NotaReceiptStore.json",
+    abi: "abis/NotaReceiptStore.json",
+    exportName: "notaReceiptStoreAbi"
   },
   {
     artifact: "out/PurchaseRefRegistry.sol/PurchaseRefRegistry.json",
     abi: "abis/PurchaseRefRegistry.json",
     exportName: "purchaseRefRegistryAbi"
+  }
+];
+
+const checkedInAbis = [
+  {
+    abi: "abis/RevealReceiptStore.json",
+    exportName: "revealReceiptStoreAbi"
   }
 ];
 
@@ -52,7 +59,29 @@ for (const contract of contracts) {
   generatedTs.push(`export const ${contract.exportName} = ${abiJson.trim()} as const;`, "");
 }
 
+for (const checkedInAbi of checkedInAbis) {
+  const abiPath = path.join(rootDir, checkedInAbi.abi);
+  let abiJson;
+
+  try {
+    abiJson = await readFile(abiPath, "utf8");
+  } catch (error) {
+    throw new Error(
+      `Missing checked-in ABI for ${checkedInAbi.exportName}: ${checkedInAbi.abi}.`,
+      { cause: error }
+    );
+  }
+
+  const abi = JSON.parse(abiJson);
+
+  if (!Array.isArray(abi)) {
+    throw new Error(`Checked-in ABI ${checkedInAbi.abi} must be an ABI-only JSON array.`);
+  }
+
+  generatedTs.push(`export const ${checkedInAbi.exportName} = ${JSON.stringify(abi, null, 2)} as const;`, "");
+}
+
 await mkdir(path.dirname(generatedTsPath), { recursive: true });
 await writeFile(generatedTsPath, `${generatedTs.join("\n")}\n`, "utf8");
 
-console.log(`Wrote ${contracts.length} ABI JSON files and package/src/abis.generated.ts.`);
+console.log(`Wrote ${contracts.length} generated ABI JSON files and package/src/abis.generated.ts.`);

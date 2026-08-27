@@ -1,1 +1,1 @@
-export { purchaseRefRegistryAbi, revealReceiptStoreAbi } from "./abis.generated.js";
+export { notaReceiptStoreAbi, purchaseRefRegistryAbi, revealReceiptStoreAbi } from "./abis.generated.js";

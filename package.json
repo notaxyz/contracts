@@ -1,13 +1,13 @@
 {
-  "name": "@reveal-protocol/contracts",
+  "name": "@notaxyz/contracts",
   "version": "0.1.0",
-  "description": "Contract ABIs and deployment metadata for Reveal Protocol.",
+  "description": "Contract ABIs and deployment metadata for Nota.",
   "type": "module",
   "private": false,
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zkreveal/contracts.git"
+    "url": "git+https://github.com/notaxyz/contracts.git"
   },
   "sideEffects": false,
   "files": [
@@ -55,12 +55,13 @@
     "compile:package": "tsc -p tsconfig.json",
     "build:package": "npm run extract:abis && npm run validate:deployments && npm run generate:deployments && npm run compile:package",
     "build": "npm run build:contracts && npm run extract:abis && npm run validate:deployments && npm run generate:deployments && npm run compile:package",
-    "prepublishOnly": "npm run build && npm run smoke:package",
     "smoke:package": "node scripts/smoke-import.mjs",
+    "prepack": "npm run build && npm run smoke:package",
     "test": "forge test",
     "clean": "rm -rf dist out cache package/src/abis.generated.ts package/src/deployments.generated.ts"
   },
   "devDependencies": {
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "viem": "^2.21.0"
   }
 }

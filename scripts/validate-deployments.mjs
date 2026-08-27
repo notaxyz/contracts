@@ -2,23 +2,16 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  isExampleFile,
+  normalizeDeployment,
+  validateNormalizedDeployment,
+  validateRawDeployment
+} from "./deployment-utils.mjs";
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const deploymentsDir = path.join(rootDir, "deployments");
-const addressPattern = /^0x[a-fA-F0-9]{40}$/;
-const zeroAddress = "0x0000000000000000000000000000000000000000";
-const environments = new Set(["mainnet", "testnet", "local"]);
-
-function isExampleFile(fileName) {
-  return fileName.startsWith("example.") || fileName.includes(".example.");
-}
-
-function isObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAddress(value) {
-  return typeof value === "string" && addressPattern.test(value);
-}
+const packageJson = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
 
 const files = (await readdir(deploymentsDir))
   .filter((fileName) => fileName.endsWith(".json"))
@@ -30,77 +23,27 @@ const seenChainIds = new Map();
 
 for (const fileName of files) {
   const filePath = path.join(deploymentsDir, fileName);
-  const addError = (message) => errors.push(`${fileName}: ${message}`);
-  let deployment;
+  let rawDeployment;
 
   try {
-    deployment = JSON.parse(await readFile(filePath, "utf8"));
+    rawDeployment = JSON.parse(await readFile(filePath, "utf8"));
   } catch (error) {
-    addError(`invalid JSON (${error.message})`);
+    errors.push(`${fileName}: invalid JSON (${error.message})`);
     continue;
   }
 
-  if (!Number.isInteger(deployment.chainId)) {
-    addError("chainId must be an integer number");
-  } else if (seenChainIds.has(deployment.chainId)) {
-    addError(`chainId duplicates ${seenChainIds.get(deployment.chainId)}`);
-  } else {
-    seenChainIds.set(deployment.chainId, fileName);
-  }
+  errors.push(...validateRawDeployment(rawDeployment, fileName));
 
-  if (typeof deployment.name !== "string" || deployment.name.length === 0) {
-    addError("name must be a non-empty string");
-  }
-
-  if (typeof deployment.network !== "string" || deployment.network.length === 0) {
-    addError("network must be a non-empty string");
-  }
-
-  if (!environments.has(deployment.environment)) {
-    addError('environment must be "mainnet", "testnet", or "local"');
-  }
-
-  if (!isObject(deployment.contracts)) {
-    addError("contracts must be an object");
-  } else {
-    for (const contractName of ["revealReceiptStore", "purchaseRefRegistry"]) {
-      const address = deployment.contracts[contractName];
-
-      if (!isAddress(address)) {
-        addError(`contracts.${contractName} must be a 0x address`);
-      } else if (address.toLowerCase() === zeroAddress) {
-        addError(`contracts.${contractName} must not be the zero address`);
-      }
-    }
-  }
-
-  if (deployment.tokens !== undefined) {
-    if (!isObject(deployment.tokens)) {
-      addError("tokens must be an object when present");
+  if (Number.isInteger(rawDeployment.chainId)) {
+    if (seenChainIds.has(rawDeployment.chainId)) {
+      errors.push(`${fileName}: chainId duplicates ${seenChainIds.get(rawDeployment.chainId)}`);
     } else {
-      for (const [symbol, address] of Object.entries(deployment.tokens)) {
-        if (!isAddress(address)) {
-          addError(`tokens.${symbol} must be a 0x address`);
-        } else if (address.toLowerCase() === zeroAddress) {
-          addError(`tokens.${symbol} must not be the zero address`);
-        }
-      }
+      seenChainIds.set(rawDeployment.chainId, fileName);
     }
   }
 
-  if (deployment.startBlock !== undefined && (!Number.isInteger(deployment.startBlock) || deployment.startBlock < 0)) {
-    addError("startBlock must be a non-negative integer when present");
-  }
-
-  if (deployment.deployedAt !== undefined) {
-    if (typeof deployment.deployedAt !== "string" || Number.isNaN(Date.parse(deployment.deployedAt))) {
-      addError("deployedAt must be an ISO date string when present");
-    }
-  }
-
-  if (deployment.version !== undefined && typeof deployment.version !== "string") {
-    addError("version must be a string when present");
-  }
+  const normalizedDeployment = normalizeDeployment(rawDeployment, fileName, packageJson.version);
+  errors.push(...validateNormalizedDeployment(normalizedDeployment, fileName));
 }
 
 if (errors.length > 0) {
@@ -110,5 +53,5 @@ if (errors.length > 0) {
   }
   process.exitCode = 1;
 } else {
-  console.log(`Validated ${files.length} deployment files.`);
+  console.log(`Validated ${files.length} raw deployment files and generated package shapes.`);
 }

@@ -8,6 +8,7 @@ script/
 src/
 test/
 docs/
+examples/
 package/
 scripts/
 foundry.lock

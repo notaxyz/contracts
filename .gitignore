@@ -16,9 +16,8 @@ build/
 dist/
 coverage/
 lcov.info
-
-# Generated package sources (rebuilt by npm run build)
-package/src/*.generated.ts
+package/src/abis.generated.ts
+package/src/deployments.generated.ts
 
 # Node
 node_modules/

@@ -56,14 +56,14 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm install
 
       - name: Build package
         run: npm run build
 
-      - name: Smoke test package exports
+      - name: Smoke import package
         run: npm run smoke:package
 
-      - name: Check npm pack contents
+      - name: Check npm package contents
         run: npm pack --dry-run
