@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -12,47 +12,63 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {FeeMath} from "./FeeMath.sol";
 import {PurchaseRefRegistry} from "./PurchaseRefRegistry.sol";
 
-/// @title RevealReceiptStore
-/// @notice Seller-first managed receipt contract for Reveal Protocol Receipt Mode.
+/// @title NotaReceiptStore
+/// @notice Seller-first managed receipt contract for Nota Receipt Mode.
 /// @dev Sellers create listings with opaque metadata commitments and an immutable receipt issuance
 ///      mode. `PublicFixedPrice` listings can be purchased directly at a public unit price, while
 ///      `SignedQuoteOnly` listings require a seller-authorized EIP-712 quote. In both modes,
-///      settlement completes immediately with an on-chain receipt record. Replay protection is
-///      enforced canonically through a shared `PurchaseRefRegistry`, while this contract keeps
-///      deterministic seller-side purchase reconciliation on-chain. Listing and receipt discovery
-///      is expected to be handled from events by indexers or seller systems.
-contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
+///      settlement completes immediately and emits `ReceiptPurchasedV2`, which is the receipt: no
+///      per-receipt storage is written. Replay protection is enforced canonically through a shared
+///      `PurchaseRefRegistry`. Listing and receipt discovery is expected to be handled from events
+///      by indexers or seller systems; `purchaseRef` is an indexed topic so reconciliation works
+///      from a plain `eth_getLogs` filter as well.
+contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // -------------------------------------------------------------------------
     // Constants
     // -------------------------------------------------------------------------
 
-    string public constant EIP712_NAME = "RevealReceiptStore";
-    string public constant EIP712_VERSION = "1";
+    string public constant EIP712_NAME = "NotaReceiptStore";
+    /// @dev Bumped to "2" for the storage-free receipt build. The domain separator already
+    ///      differs per chain via `chainId` and `verifyingContract`, so this is a labelling
+    ///      change rather than a replay barrier: it stops a v1 signing config from being pointed
+    ///      at a v2 deployment and silently producing a digest the contract will reject.
+    string public constant EIP712_VERSION = "2";
     /// @dev 50 bps = 0.5%.
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 50;
-    /// @dev 450 bps = 4.5%. Combined with the protocol fee cap, v1 fees cannot exceed 5%.
+    /// @dev 450 bps = 4.5%. Combined with the protocol fee cap, fees cannot exceed 5%.
     uint16 public constant MAX_INTEGRATOR_FEE_BPS = 450;
-    /// @dev v1 assumes a 6-decimal settlement token such as USDC.
-    ///      `1e6` means 1 USDC when the settlement token uses 6 decimals.
+    /// @dev This contract assumes a 6-decimal settlement token such as USDC.
+    ///      `1e2` means 0.0001 USDC when the settlement token uses 6 decimals. The floor is set
+    ///      this low deliberately: x402 agent payments are typically fractions of a cent, and a
+    ///      1 USDC floor excluded them entirely.
+    ///
+    ///      Fee math holds at the floor. Both fees floor-divide, and the caps sum to 500 bps, so
+    ///      `protocolFee + integratorFee <= grossAmount / 20` for every amount -- fees can never
+    ///      reach the gross, and `sellerNet` is always at least 95% of it. At the floor itself a
+    ///      50 bps protocol fee rounds to zero (it needs `grossAmount >= 200` to reach 1 base
+    ///      unit) and the integrator fee caps at 4, so the seller nets at least 96 of 100.
+    ///      Rounding therefore favours the seller, never the other way, and a zero `sellerNet`
+    ///      is unreachable rather than merely unlikely.
+    ///
     ///      This contract enforces only a minimum purchase amount.
-    uint256 public constant MIN_PURCHASE_AMOUNT = 1e6;
+    uint256 public constant MIN_PURCHASE_AMOUNT = 1e2;
     uint64 public constant MAX_QUOTE_TTL = 24 hours;
     uint256 public constant MAX_LISTINGS_PER_SELLER = 500;
     uint256 public constant MAX_QUOTE_SIGNERS_PER_LISTING = 3;
-    string internal constant PURCHASE_REF_HASH_DOMAIN = "zkReveal.purchaseRef.receipt.v1";
+    string internal constant PURCHASE_REF_HASH_DOMAIN = "nota.purchaseRef.receipt.v1";
     uint256 internal constant MAX_RAW_PURCHASE_REF_LENGTH = 128;
     bytes32 public constant SIGNED_RECEIPT_QUOTE_TYPEHASH = keccak256(
-        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)"
+        "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,bytes32 agentId,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)"
     );
 
     // -------------------------------------------------------------------------
     // Immutables
     // -------------------------------------------------------------------------
 
-    /// @notice Settlement token used for all v1 purchases.
-    /// @dev Official v1 deployments are intended for 6-decimal tokens such as USDC.
+    /// @notice Settlement token used for all purchases.
+    /// @dev Official deployments are intended for 6-decimal tokens such as USDC.
     ///      The constructor does not inspect token decimals.
     IERC20 public immutable SETTLEMENT_TOKEN;
     /// @notice Canonical protocol-level replay protection registry shared across settlement stores.
@@ -64,7 +80,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // Enums
     // -------------------------------------------------------------------------
 
-    /// @notice Receipt issuance mode a listing is locked into at creation. Immutable in v1.
+    /// @notice Receipt issuance mode a listing is locked into at creation. Immutable once set.
     /// @dev `PublicFixedPrice` means public direct checkout at the listing `unitPrice`: anyone may
     ///      buy directly via `purchaseReceipt`. Seller-authorized EIP-712 quotes via
     ///      `purchaseSignedReceipt` are ALSO allowed for these listings, which is what enables
@@ -92,21 +108,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         ListingMode mode;
     }
 
-    /// @dev Receipt Mode proof-of-payment record. Fulfillment meaning remains off-chain in seller
-    ///      systems. `purchaseRef` is the submitted `bytes32` hash; raw reference and nonce data
-    ///      remain off-chain. Receipt discovery is expected to come from events or indexers.
-    struct Receipt {
-        uint256 listingId;
-        address seller;
-        address buyer;
-        uint256 amount;
-        bytes32 purchaseRef;
-        uint64 issuedAt;
-    }
-
     /// @notice Seller-authorized EIP-712 quote for a receipt purchase, with optional buyer binding.
     /// @dev The signed digest binds the listing seller, `listingId`, `buyer`, `purchaseRef`,
-    ///      `amount`, `metadataHash`, the v1 `SETTLEMENT_TOKEN`, the immutable
+    ///      `amount`, `metadataHash`, the immutable `SETTLEMENT_TOKEN`, the
     ///      `PURCHASE_REF_REGISTRY`, optional integrator fee fields, seller-declared `issuedAt`,
     ///      `expiresAt`, `block.chainid`, and `address(this)`. `buyer` is optional: when it is a
     ///      non-zero address it must match `msg.sender` during `purchaseSignedReceipt`, so another
@@ -114,7 +118,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      and any wallet may submit and pay, with the payer recorded as the receipt buyer.
     ///      Single-use `purchaseRef` still prevents the quote from being redeemed more than once. The
     ///      quote may be signed by the seller directly or by a signer authorized for this listing with
-    ///      `setListingQuoteSigner`. Authorization is listing-scoped in v1, so an authorized quote signer
+    ///      `setListingQuoteSigner`. Authorization is listing-scoped, so an authorized quote signer
     ///      can sign quotes only for the specific `listingId` where that signer was authorized.
     ///      A listing-authorized signer controls the full signed quote intent for that listing,
     ///      including amount, metadata, buyer binding, purchaseRef, and optional integrator fee fields.
@@ -122,12 +126,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      `(rawPurchaseRef, purchaseRefNonce)` entitlement bundle.
     ///      Only this hash belongs in the quote; `purchaseRefNonce` must remain off-chain and must
     ///      not be added to `SignedReceiptQuote` or settlement calldata. `metadataHash` commits to
-    ///      the seller-authorized canonical checkout metadata (the v1 payment-intent payload) as
+    ///      the seller-authorized canonical checkout metadata (the payment-intent payload) as
     ///      `keccak256` over its JCS-canonicalized JSON; it MUST be non-zero here and MUST NOT
     ///      commit to secrets or buyer PII (never `purchaseRefNonce`, unlock/delivery secrets,
     ///      private invite links, emails, phone numbers, or Telegram handles). The contract only
     ///      ever sees and stores this `bytes32` commitment; the readable metadata stays off-chain.
-    ///      See "Canonical Checkout Metadata" in the contracts README for the v1 shape and rules.
+    ///      See "Canonical Checkout Metadata" in the contracts README for the shape and rules.
     ///      `amount` is denominated in settlement token base units.
     ///      Integrator fee fields are optional, must be explicitly included in the
     ///      seller-authorized quote, and are paid from the gross `amount`; the seller receives
@@ -141,10 +145,32 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         uint256 amount;
         /// @dev keccak256 over the JCS-canonicalized canonical checkout metadata. Non-zero, no secrets/PII.
         bytes32 metadataHash;
+        /// @dev Opaque identifier for the agent this sale was made to, carried for ERC-8004-style
+        ///      attribution. Held as `bytes32` so the protocol is not coupled to any registry's ID
+        ///      representation: it may be a registry-scoped identifier or a hash of one. Zero means
+        ///      unspecified and is always valid. The contract performs no validation and resolves
+        ///      it against no registry -- see the note on `ReceiptPurchasedV2` for what this does
+        ///      and does not attest.
+        bytes32 agentId;
         address integratorFeeRecipient;
         uint256 integratorFeeAmount;
         uint64 issuedAt;
         uint64 expiresAt;
+    }
+
+    /// @dev Settlement inputs grouped into a struct rather than passed as ten positional
+    ///      arguments, which exhausts the stack.
+    struct ReceiptSettlement {
+        uint256 listingId;
+        address seller;
+        address payer;
+        address receiptBuyer;
+        uint256 amount;
+        bytes32 purchaseRef;
+        bytes32 metadataHash;
+        bytes32 agentId;
+        address integratorFeeRecipient;
+        uint256 integratorFeeAmount;
     }
 
     struct RakeQuote {
@@ -165,7 +191,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         address integratorFeeRecipient;
         address seller;
         bytes32 listingHash;
-        address recoveredSigner;
+        address verifiedSigner;
     }
 
     // -------------------------------------------------------------------------
@@ -173,12 +199,16 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     uint256 public nextListingId = 1;
+    /// @dev Monotonic receipt identifier. Receipts themselves are not stored on-chain: the
+    ///      `ReceiptPurchasedV2` event is the record, and `purchaseRef` replay protection lives in
+    ///      `PURCHASE_REF_REGISTRY`. This counter only keeps event ids unique and ordered.
     uint256 public nextReceiptId = 1;
 
     mapping(uint256 => Listing) public listings;
-    mapping(uint256 => Receipt) public receipts;
-    /// @dev Enforces `MAX_LISTINGS_PER_SELLER`. Listing discovery is expected to come from
-    ///      `ListingCreated` events or indexers, not on-chain enumeration.
+    /// @dev Number of listings a seller currently has active, enforcing `MAX_LISTINGS_PER_SELLER`
+    ///      as a concurrency cap: `createListing` and reactivation increment it, deactivation
+    ///      decrements it. Listing discovery is expected to come from `ListingCreated` events or
+    ///      indexers, not on-chain enumeration.
     mapping(address seller => uint256 count) public listingCountBySeller;
     /// @dev Listing-scoped quote signer authorization.
     ///      `authorizedQuoteSigners[listingId][signer] = true` means `signer` may sign
@@ -186,11 +216,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     mapping(uint256 listingId => mapping(address signer => bool)) public authorizedQuoteSigners;
     /// @dev Number of currently authorized quote signers for each listing.
     mapping(uint256 listingId => uint256 count) public authorizedQuoteSignerCount;
-    /// @dev Deterministic seller-scoped reconciliation helper for `purchaseRef` hashes derived
-    ///      from off-chain `(rawPurchaseRef, purchaseRefNonce)` bundles. Canonical replay protection lives in
-    ///      `PURCHASE_REF_REGISTRY`; this mapping is retained only for seller and indexer receipt
-    ///      lookup after settlement and returns 0 if no matching receipt has been recorded here.
-    mapping(address => mapping(bytes32 => uint256)) public receiptIdBySellerAndPurchaseRef;
 
     bool public listingCreationPaused;
     bool public purchasesPaused;
@@ -210,14 +235,31 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     event ListingStatusChanged(uint256 indexed listingId, address indexed seller, bool active);
 
-    event ReceiptPurchased(
-        uint256 indexed receiptId,
+    /// @dev `purchaseRef` is indexed so a plain `eth_getLogs` filter can resolve a purchase
+    ///      reference to its settlement without an indexer. That lookup is the reconciliation
+    ///      path, and it is why `purchaseRef` takes one of the three topic slots ahead of
+    ///      `receiptId`: nobody searches for a receipt id they do not already have.
+    ///
+    ///      The `V2` suffix is load-bearing. Indexedness is not part of an event signature, so
+    ///      keeping the v1 name would have produced an identical `topic0` with a different topic
+    ///      layout to the live v1 deployment -- an indexer matching on `topic0` alone would decode
+    ///      a seller address as a receipt id and never raise an error. A distinct name makes the
+    ///      two impossible to confuse without anyone having to read documentation.
+    /// @dev `agentId` is seller-attested, not chain-verified. It records that the seller claims
+    ///      to have sold to the agent bearing this identifier; the contract never resolves it
+    ///      against a registry and performs no validation, so it is exactly as trustworthy as the
+    ///      seller's own verification of the claim. Zero means unspecified. It is deliberately
+    ///      unindexed -- the three topic slots go to `seller`, `buyer`, and `purchaseRef`, which
+    ///      is where reconciliation queries start. Agent-level rollups are an indexer's job.
+    event ReceiptPurchasedV2(
+        uint256 receiptId,
         address indexed seller,
         address indexed buyer,
         uint256 listingId,
-        bytes32 purchaseRef,
+        bytes32 indexed purchaseRef,
         uint256 amount,
-        bytes32 metadataHash
+        bytes32 metadataHash,
+        bytes32 agentId
     );
 
     event ProtocolFeePaid(
@@ -242,7 +284,6 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
 
     error ListingNotFound();
-    error ReceiptNotFound();
     error NotListingSeller();
     error ListingInactive();
     error ListingRequiresSignedQuote();
@@ -259,6 +300,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     error AmountOutOfBounds();
     error QuoteExpiryTooLong();
     error SellerListingLimitReached();
+    error RenounceWhilePausedDisabled();
     error QuoteSignerLimitReached();
     error PriceMismatch();
 
@@ -271,17 +313,12 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         _;
     }
 
-    modifier receiptExists(uint256 receiptId) {
-        _receiptExists(receiptId);
-        _;
-    }
-
     // -------------------------------------------------------------------------
     // Constructor
     // -------------------------------------------------------------------------
 
-    /// @notice Deploy a v1 receipt store with a fixed settlement token and protocol fee model.
-    /// @dev Official v1 deployments are intended for 6-decimal settlement tokens such as USDC.
+    /// @notice Deploy a receipt store with a fixed settlement token and protocol fee model.
+    /// @dev Official deployments are intended for 6-decimal settlement tokens such as USDC.
     ///      The constructor validates only address and fee bounds and does not inspect token
     ///      decimals.
     constructor(
@@ -390,8 +427,20 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         view
         returns (bytes32)
     {
-        return _hashTypedDataV4(
-            keccak256(
+        return _hashTypedDataV4(_signedReceiptQuoteStructHash(quote, seller));
+    }
+
+    /// @dev Encoded in two halves purely to stay within the stack limit. Every member is a
+    ///      32-byte value type, so concatenating the halves is byte-identical to a single
+    ///      `abi.encode` of all thirteen members and the EIP-712 digest is unchanged.
+    function _signedReceiptQuoteStructHash(SignedReceiptQuote calldata quote, address seller)
+        private
+        view
+        returns (bytes32)
+    {
+        // forge-lint: disable-start(asm-keccak256)
+        return keccak256(
+            bytes.concat(
                 abi.encode(
                     SIGNED_RECEIPT_QUOTE_TYPEHASH,
                     quote.listingId,
@@ -400,6 +449,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
                     quote.purchaseRef,
                     quote.amount,
                     quote.metadataHash,
+                    quote.agentId
+                ),
+                abi.encode(
                     address(SETTLEMENT_TOKEN),
                     address(PURCHASE_REF_REGISTRY),
                     quote.integratorFeeRecipient,
@@ -409,24 +461,32 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
                 )
             )
         );
+        // forge-lint: disable-end(asm-keccak256)
     }
 
     function _listingExists(uint256 listingId) internal view {
         if (listings[listingId].seller == address(0)) revert ListingNotFound();
     }
 
-    function _receiptExists(uint256 receiptId) internal view {
-        if (receipts[receiptId].seller == address(0)) revert ReceiptNotFound();
-    }
-
     function _onlyListingSeller(uint256 listingId) internal view {
         if (listings[listingId].seller != msg.sender) revert NotListingSeller();
     }
 
+    /// @dev `claimedSigner` names the address the caller asserts produced `sellerSignature`;
+    ///      `address(0)` means the listing seller, which is the common case. Asserting an address
+    ///      proves nothing on its own: the claim is authoritative only after it clears both the
+    ///      authorization check and signature verification below, and an unauthorized address
+    ///      fails the mapping lookup regardless of who submits it.
+    ///
+    ///      The parameter exists because `SignatureChecker` inverts `ECDSA.recover`: it takes a
+    ///      candidate signer and returns a bool rather than recovering an address. ERC-1271
+    ///      contract wallets cannot be recovered from at all, so there is no address to compare
+    ///      against `authorizedQuoteSigners`, and that mapping cannot be enumerated to find one.
     function _verifySignedReceiptQuoteWithSigner(
         SignedReceiptQuote calldata quote,
         bytes calldata sellerSignature,
-        address expectedBuyer
+        address expectedBuyer,
+        address claimedSigner
     ) internal view returns (Listing storage listing, address signer) {
         listing = listings[quote.listingId];
 
@@ -446,9 +506,19 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
             revert PurchaseRefAlreadyUsed();
         }
 
-        bytes32 digest = _hashSignedReceiptQuote(quote, listing.seller);
-        signer = ECDSA.recover(digest, sellerSignature);
+        // Zero resolves to the seller. Passing the seller explicitly is equivalent, which
+        // matters because a seller cannot appear in their own authorizedQuoteSigners mapping.
+        signer = claimedSigner == address(0) ? listing.seller : claimedSigner;
         if (signer != listing.seller && !authorizedQuoteSigners[quote.listingId][signer]) {
+            revert InvalidQuoteSigner();
+        }
+
+        bytes32 digest = _hashSignedReceiptQuote(quote, listing.seller);
+        // Accepts both EOA signatures and ERC-1271 contract-wallet signatures, which is what
+        // lets Coinbase Smart Wallet sellers sign quotes at all. Returns false rather than
+        // reverting on a malformed signature or a hostile wallet, so this is the single
+        // rejection point.
+        if (!SignatureChecker.isValidSignatureNowCalldata(signer, digest, sellerSignature)) {
             revert InvalidQuoteSigner();
         }
     }
@@ -456,18 +526,20 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     function _verifySignedReceiptQuote(
         SignedReceiptQuote calldata quote,
         bytes calldata sellerSignature,
-        address expectedBuyer
+        address expectedBuyer,
+        address claimedSigner
     ) internal view returns (Listing storage listing) {
-        (listing,) = _verifySignedReceiptQuoteWithSigner(quote, sellerSignature, expectedBuyer);
+        (listing,) = _verifySignedReceiptQuoteWithSigner(quote, sellerSignature, expectedBuyer, claimedSigner);
     }
 
     function _validateSignedReceiptPurchaseView(
         SignedReceiptQuote calldata quote,
         bytes calldata sellerSignature,
-        address expectedBuyer
+        address expectedBuyer,
+        address claimedSigner
     ) internal view returns (SignedReceiptPurchaseValidation memory validation) {
         (Listing storage listing, address signer) =
-            _verifySignedReceiptQuoteWithSigner(quote, sellerSignature, expectedBuyer);
+            _verifySignedReceiptQuoteWithSigner(quote, sellerSignature, expectedBuyer, claimedSigner);
         RakeQuote memory rake = _quoteRake(quote.amount, quote.integratorFeeRecipient, quote.integratorFeeAmount);
 
         validation.grossAmount = rake.grossAmount;
@@ -478,47 +550,51 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         validation.integratorFeeRecipient = rake.integratorFeeRecipient;
         validation.seller = listing.seller;
         validation.listingHash = listing.listingHash;
-        validation.recoveredSigner = signer;
+        validation.verifiedSigner = signer;
     }
 
     /// @dev `payer` provides the settlement token. `receiptBuyer` is the buyer recorded on-chain.
-    ///      In direct v1 purchases both are `msg.sender`; future adapter flows may split them.
-    function _settleReceiptPurchase(
-        uint256 listingId,
-        address seller,
-        address payer,
-        address receiptBuyer,
-        uint256 amount,
-        bytes32 purchaseRef,
-        bytes32 metadataHash,
-        address integratorFeeRecipient,
-        uint256 integratorFeeAmount
-    ) internal returns (uint256 receiptId) {
-        RakeQuote memory rake = _quoteRake(amount, integratorFeeRecipient, integratorFeeAmount);
+    ///      In direct purchases both are `msg.sender`; future adapter flows may split them.
+    function _settleReceiptPurchase(ReceiptSettlement memory input) internal returns (uint256 receiptId) {
+        RakeQuote memory rake = _quoteRake(input.amount, input.integratorFeeRecipient, input.integratorFeeAmount);
 
-        SETTLEMENT_TOKEN.safeTransferFrom(payer, address(this), amount);
-        PURCHASE_REF_REGISTRY.consume(purchaseRef);
+        SETTLEMENT_TOKEN.safeTransferFrom(input.payer, address(this), input.amount);
+        PURCHASE_REF_REGISTRY.consume(input.purchaseRef);
 
         receiptId = nextReceiptId++;
 
-        Receipt storage receipt = receipts[receiptId];
-        receipt.listingId = listingId;
-        receipt.seller = seller;
-        receipt.buyer = receiptBuyer;
-        receipt.amount = amount;
-        receipt.purchaseRef = purchaseRef;
-        receipt.issuedAt = uint64(block.timestamp);
+        _distributeReceiptPurchaseProceeds(receiptId, input.listingId, input.seller, rake);
 
-        receiptIdBySellerAndPurchaseRef[seller][purchaseRef] = receiptId;
-
-        _distributeReceiptPurchaseProceeds(receiptId, listingId, seller, rake);
-
-        emit ReceiptPurchased(receiptId, seller, receiptBuyer, listingId, purchaseRef, amount, metadataHash);
+        emit ReceiptPurchasedV2(
+            receiptId,
+            input.seller,
+            input.receiptBuyer,
+            input.listingId,
+            input.purchaseRef,
+            input.amount,
+            input.metadataHash,
+            input.agentId
+        );
     }
 
     // -------------------------------------------------------------------------
     // Seller Configuration Functions
     // -------------------------------------------------------------------------
+
+    /// @notice Permanently give up ownership. Disabled while any pause flag is set.
+    /// @dev Only the owner can clear a pause flag, so renouncing mid-pause strands the contract in
+    ///      that state forever with no recovery path: with `listingCreationPaused` no seller could
+    ///      ever list again, with `purchasesPaused` no buyer could ever purchase, and with
+    ///      `quoteSignerUpdatesPaused` no seller could ever rotate a compromised quote signer.
+    ///      All three are covered because all three are permanent once ownership is gone.
+    ///      Clear the pauses first, then renounce. Renouncing while unpaused is still permitted
+    ///      and still irreversible.
+    function renounceOwnership() public override onlyOwner {
+        if (purchasesPaused || listingCreationPaused || quoteSignerUpdatesPaused) {
+            revert RenounceWhilePausedDisabled();
+        }
+        super.renounceOwnership();
+    }
 
     /// @notice Authorize or revoke a signer for one seller-owned listing's signed receipt quotes.
     /// @dev When authorized, `signer` can sign `SignedReceiptQuote` values only for `listingId`.
@@ -580,8 +656,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Create a seller-owned listing for Receipt Mode purchases in an explicit purchase mode.
     /// @dev `listingHash` is an opaque seller-defined metadata commitment. Human-readable product
     ///      data lives off-chain, for example inside a seller-signed payment link. `mode` selects
-    ///      how the listing may be purchased and is immutable for the lifetime of the listing; v1
-    ///      intentionally has no `setListingMode`. To move a product to a different mode, deactivate
+    ///      how the listing may be purchased and is immutable for the lifetime of the listing; there
+    ///      is intentionally no `setListingMode`. To move a product to a different mode, deactivate
     ///      the listing with `setListingActive(listingId, false)` and create a new one.
     ///
     ///      For `ListingMode.PublicFixedPrice`, `unitPrice` is the immutable on-chain price
@@ -627,9 +703,33 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Update the active status of a seller-owned listing.
     /// @dev Listing prices are immutable after `createListing`. To change the price for a product,
     ///      the seller must create a new listing and optionally deactivate the old one.
+    ///
+    ///      Deactivating releases the listing's slot against `MAX_LISTINGS_PER_SELLER` and
+    ///      reactivating reclaims one, re-checking the cap. The cap therefore limits how many
+    ///      listings a seller may have active at once, not how many they may ever create: a seller
+    ///      who rotates prices by superseding listings is not permanently spending their budget.
+    ///      Reactivation can fail when the seller has since filled the cap, which is the intended
+    ///      trade for that.
     function setListingActive(uint256 listingId, bool active) external listingExists(listingId) {
         _onlyListingSeller(listingId);
-        listings[listingId].active = active;
+
+        Listing storage listing = listings[listingId];
+        // A no-op must not move the counter, and must not fail against a cap it is not consuming.
+        if (listing.active == active) {
+            emit ListingStatusChanged(listingId, msg.sender, active);
+            return;
+        }
+
+        if (active) {
+            if (listingCountBySeller[msg.sender] >= MAX_LISTINGS_PER_SELLER) {
+                revert SellerListingLimitReached();
+            }
+            listingCountBySeller[msg.sender]++;
+        } else {
+            listingCountBySeller[msg.sender]--;
+        }
+
+        listing.active = active;
         emit ListingStatusChanged(listingId, msg.sender, active);
     }
 
@@ -643,8 +743,9 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      with `ListingRequiresSignedQuote` and must be bought through `purchaseSignedReceipt`.
     ///      The buyer must pass the exact listing
     ///      `unitPrice` as `amount`; the contract reverts with `PriceMismatch` if it differs in
-    ///      either direction. Together with immutable listing prices (no `setListingPrice` exists
-    ///      in v1), this means the on-chain price the buyer asserts is the price they pay. The
+    ///      either direction. Together with immutable listing prices (there is no
+    ///      `setListingPrice`), this means the on-chain price the buyer asserts is the price they
+    ///      pay. The
     ///      caller is not buyer-bound before submission, and `msg.sender` is recorded as the
     ///      buyer. Any wallet that submits a valid unconsumed `purchaseRef` first and pays first
     ///      receives the receipt. `purchaseRef` should normally be the output of
@@ -655,10 +756,10 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      including `listingId` in the hash.`listingId` is accepted by `hashPurchaseRef` only to validate seller ownership;
     ///       it is not part of the purchaseRef preimage.  Use `purchaseSignedReceipt` instead for buyer-bound payment links,
     ///      private checkout flows, dynamic pricing, or integrator fees. This direct path commits no
-    ///      off-chain checkout metadata, so `ReceiptPurchased` is emitted with
+    ///      off-chain checkout metadata, so `ReceiptPurchasedV2` is emitted with
     ///      `metadataHash = bytes32(0)`. Payment settles
     ///      immediately and fulfillment remains entirely off-chain in seller systems. Receipt
-    ///      discovery is expected to be handled from `ReceiptPurchased` events or indexers.
+    ///      discovery is expected to be handled from `ReceiptPurchasedV2` events or indexers.
     function purchaseReceipt(uint256 listingId, bytes32 purchaseRef, uint256 amount)
         external
         nonReentrant
@@ -677,7 +778,18 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         }
 
         return _settleReceiptPurchase(
-            listingId, listing.seller, msg.sender, msg.sender, amount, purchaseRef, bytes32(0), address(0), 0
+            ReceiptSettlement({
+                listingId: listingId,
+                seller: listing.seller,
+                payer: msg.sender,
+                receiptBuyer: msg.sender,
+                amount: amount,
+                purchaseRef: purchaseRef,
+                metadataHash: bytes32(0),
+                agentId: bytes32(0),
+                integratorFeeRecipient: address(0),
+                integratorFeeAmount: 0
+            })
         );
     }
 
@@ -685,7 +797,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @dev Valid for both listing modes: it is the required path for `ListingMode.SignedQuoteOnly`
     ///      listings and an additional supported path for `ListingMode.PublicFixedPrice` listings
     ///      (buyer-bound payment links, metadata-bound checkout, dynamic pricing, integrator fees).
-    ///      This is the recommended v1 flow for production checkout and payment-link integrations.
+    ///      This is the recommended flow for production checkout and payment-link integrations.
     ///      Seller Payment Link Mode uses a quote signed by the listing seller or a signer authorized
     ///      for the quoted listing, with `quote.purchaseRef` carrying the seller-scoped hash
     ///      derived from an off-chain `(rawPurchaseRef, purchaseRefNonce)` entitlement bundle. The
@@ -700,31 +812,33 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      of the signed EIP-712 payload. A signed quote is valid only between `issuedAt` and
     ///      `expiresAt`, and `quote.expiresAt - quote.issuedAt` must not exceed
     ///      `MAX_QUOTE_TTL`. If `quote.buyer` is non-zero it must match `msg.sender`; a zero
-    ///      `quote.buyer` leaves the quote unbound so any wallet may purchase it. The recovered signer must be
+    ///      `quote.buyer` leaves the quote unbound so any wallet may purchase it. The verified signer must be
     ///      the listing seller or a signer authorized specifically for `quote.listingId`. The signed quote may
     ///      also include an optional integrator fee paid from the
     ///      gross amount. `quote.metadataHash` must be non-zero and commits to the seller-authorized
     ///      canonical checkout metadata (keccak256 over its JCS-canonicalized JSON); the contract
-    ///      only sees/stores that `bytes32` and emits it in `ReceiptPurchased`.
-    function purchaseSignedReceipt(SignedReceiptQuote calldata quote, bytes calldata sellerSignature)
-        external
-        nonReentrant
-        listingExists(quote.listingId)
-        returns (uint256 receiptId)
-    {
+    ///      only sees/stores that `bytes32` and emits it in `ReceiptPurchasedV2`.
+    function purchaseSignedReceipt(
+        SignedReceiptQuote calldata quote,
+        bytes calldata sellerSignature,
+        address claimedSigner
+    ) external nonReentrant listingExists(quote.listingId) returns (uint256 receiptId) {
         if (purchasesPaused) revert PurchasesPaused();
-        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, msg.sender);
+        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, msg.sender, claimedSigner);
 
         return _settleReceiptPurchase(
-            quote.listingId,
-            listing.seller,
-            msg.sender,
-            msg.sender,
-            quote.amount,
-            quote.purchaseRef,
-            quote.metadataHash,
-            quote.integratorFeeRecipient,
-            quote.integratorFeeAmount
+            ReceiptSettlement({
+                listingId: quote.listingId,
+                seller: listing.seller,
+                payer: msg.sender,
+                receiptBuyer: msg.sender,
+                amount: quote.amount,
+                purchaseRef: quote.purchaseRef,
+                metadataHash: quote.metadataHash,
+                agentId: quote.agentId,
+                integratorFeeRecipient: quote.integratorFeeRecipient,
+                integratorFeeAmount: quote.integratorFeeAmount
+            })
         );
     }
 
@@ -735,7 +849,7 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Return the canonical on-chain `purchaseRef` hash for an off-chain
     ///         `(rawPurchaseRef, purchaseRefNonce)` bundle.
     /// @dev `rawPurchaseRef` is the human/business identifier (e.g. `invoice-123` or the canonical
-    ///      `<namespace>_<context>_<random>` form like `rev_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`),
+    ///      `<namespace>_<context>_<random>` form like `nota_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`),
     ///      while `purchaseRefNonce` is a secret high-entropy random `bytes32` salt. The cryptographic
     ///      strength of the commitment comes from `purchaseRefNonce`: even a guessable
     ///      `rawPurchaseRef` cannot be brute-forced into the on-chain `purchaseRef` without knowing
@@ -744,8 +858,8 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      the buyer does not necessarily see the nonce directly. `purchaseRefNonce` must remain
     ///      off-chain and must not be added to `SignedReceiptQuote` or settlement calldata. Only
     ///      the resulting `bytes32 purchaseRef` hash is submitted on-chain.
-    ///      The hash is seller-scoped by the Reveal Protocol domain string
-    ///      `zkReveal.purchaseRef.receipt.v1`, `block.chainid`, the settlement token, `seller`,
+    ///      The hash is seller-scoped by the Nota domain string
+    ///      `nota.purchaseRef.receipt.v1`, `block.chainid`, the settlement token, `seller`,
     ///      `rawPurchaseRef`, and `purchaseRefNonce`, so `rawPurchaseRef` does not need to include
     ///      seller, chain, token, or domain data itself. `listingId` is validated only to confirm
     ///      that `seller` owns the listing; it is intentionally not included in the hash. Reuse
@@ -862,32 +976,15 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      seller-declared quote issuance timestamp and part of the signed EIP-712 payload. A
     ///      signed quote is valid only between `issuedAt` and `expiresAt`, and
     ///      `quote.expiresAt - quote.issuedAt` must not exceed `MAX_QUOTE_TTL`. It is useful for
-    ///      frontends, bots, and backends that want the final fee breakdown and recovered signer
+    ///      frontends, bots, and backends that want the final fee breakdown and verified signer
     ///      before prompting a buyer to approve or pay.
     function validateSignedReceiptPurchase(
         SignedReceiptQuote calldata quote,
         bytes calldata sellerSignature,
-        address expectedBuyer
-    )
-        external
-        view
-        listingExists(quote.listingId)
-        returns (uint256, uint256, uint256, uint256, address, address, address, bytes32, address)
-    {
-        SignedReceiptPurchaseValidation memory validation =
-            _validateSignedReceiptPurchaseView(quote, sellerSignature, expectedBuyer);
-
-        return (
-            validation.grossAmount,
-            validation.protocolFee,
-            validation.integratorFee,
-            validation.sellerNet,
-            validation.protocolFeeRecipient,
-            validation.integratorFeeRecipient,
-            validation.seller,
-            validation.listingHash,
-            validation.recoveredSigner
-        );
+        address expectedBuyer,
+        address claimedSigner
+    ) external view listingExists(quote.listingId) returns (SignedReceiptPurchaseValidation memory) {
+        return _validateSignedReceiptPurchaseView(quote, sellerSignature, expectedBuyer, claimedSigner);
     }
 
     function getListing(uint256 listingId) external view listingExists(listingId) returns (Listing memory) {
@@ -904,17 +1001,5 @@ contract RevealReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     {
         Listing storage listing = listings[listingId];
         return signer == listing.seller || authorizedQuoteSigners[listingId][signer];
-    }
-
-    function getReceipt(uint256 receiptId) external view receiptExists(receiptId) returns (Receipt memory) {
-        return receipts[receiptId];
-    }
-
-    /// @notice Return the locally recorded receipt ID for a seller-scoped lookup key, or 0 if absent.
-    /// @dev Sellers, bots, integrators, and indexers can recompute the canonical hash from the
-    ///      off-chain `(rawPurchaseRef, purchaseRefNonce)` bundle via `hashPurchaseRef` and use
-    ///      this getter as a deterministic on-chain reconciliation helper for the matching receipt.
-    function getReceiptIdBySellerAndPurchaseRef(address seller, bytes32 purchaseRef) external view returns (uint256) {
-        return receiptIdBySellerAndPurchaseRef[seller][purchaseRef];
     }
 }

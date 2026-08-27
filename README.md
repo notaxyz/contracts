@@ -1,12 +1,12 @@
-# Reveal Protocol v1
+# Nota v1
 
-Reveal Protocol v1 is a minimal on-chain receipt and settlement layer for digital sellers.
+Nota v1 is a minimal on-chain receipt and settlement layer for digital sellers.
 
 Buyer pays.  
 Seller gets paid.  
 Your backend receives a verifiable on-chain purchase receipt.
 
-Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchased`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
+Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
 v1 is intentionally limited to Receipt Mode.
 
@@ -22,46 +22,42 @@ v1 is intentionally limited to Receipt Mode.
 
 - v1 does not act as a marketplace, escrow system, refund system, or delivery-verification protocol
 
-## Why "zk"?
+## What Goes On-Chain
 
-The current Receipt Mode contracts do not implement zero-knowledge proofs.
-
-The contracts focus on the first production primitive of zkReveal:
+The contracts implement one primitive:
 
 ```text
 payment → settlement → on-chain receipt
 ```
 
-The "zk" name refers to the project’s longer-term direction, where future modules may introduce privacy-preserving verification, selective disclosure, encrypted delivery, or reveal mechanisms.
+Everything else is deliberately kept off-chain, which is also what bounds how much a public receipt
+discloses:
 
-In the current contracts, privacy is limited to design choices such as:
-
-- storing metadata commitments instead of full metadata
-- using opaque purchase references
-- keeping fulfillment and delivery logic off-chain
-- emitting indexable payment and receipt events
-
-This README describes the current smart contract system only. It should not be read as a claim that the current contracts use ZK proofs.
+- listing metadata is committed as a hash, never stored in full
+- purchase references are opaque `bytes32` hashes; the raw reference and its secret nonce stay
+  off-chain
+- fulfillment, delivery, refunds, disputes, and support live in seller systems
+- receipts are events rather than storage, and carry commitments rather than contents
 
 ## Product Model
 
-Reveal Protocol v1 receipt mode has two immutable on-chain components:
+Nota v1 receipt mode has two immutable on-chain components:
 
 - `PurchaseRefRegistry` is the canonical replay-protection primitive. It consumes each
   protocol-scoped `purchaseRef` once and stores which authorized settlement contract or module
   consumed it. Random wallets cannot consume refs directly. The registry owner may authorize or
   deauthorize settlement modules for future use, but cannot delete or unconsume refs that have
   already been consumed.
-- `RevealReceiptStore` is the seller-facing receipt settlement contract. It manages listings,
+- `NotaReceiptStore` is the seller-facing receipt settlement contract. It manages listings,
   signatures, payment settlement, and receipt records.
 
-Current and future Reveal Protocol settlement contracts only share replay protection when they point to
+Current and future Nota settlement contracts only share replay protection when they point to
 the same `PurchaseRefRegistry`. Adding a future settlement module requires authorizing that module
 in the shared registry.
 
 ### Deployment Note
 
-`RevealReceiptStore` must be authorized as a `PurchaseRefRegistry` consumer before purchases can
+`NotaReceiptStore` must be authorized as a `PurchaseRefRegistry` consumer before purchases can
 settle. The deployment script handles this by deploying the registry with the deployer as temporary
 owner, authorizing the receipt store, and then transferring registry ownership to
 `PROTOCOL_OWNER`.
@@ -100,19 +96,17 @@ For production checkout/payment-link flows, prefer signed quotes.
 - Suitable for simple public listings where any buyer may purchase.
 - Not recommended for seller-issued private payment links, Telegram checkout links, order-specific checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
 
-### `purchaseSignedReceipt(quote, sellerSignature)`
+### `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)`
 
 - Recommended default for production checkout/payment-link flows.
 - Works for both listing modes: required for `SignedQuoteOnly`, and also supported on `PublicFixedPrice` listings.
 - Uses a seller-authorized EIP-712 quote.
-- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, settlementToken, purchaseRefRegistry, expiry, chain, and contract.
+- Binds buyer, listingId, seller, amount, purchaseRef, metadataHash, agentId, settlementToken, purchaseRefRegistry, expiry, chain, and contract.
 - `buyer` is optional: a non-zero `buyer` must match `msg.sender`, so another wallet cannot redeem the same quote; a zero `buyer` leaves the quote unbound so any wallet may submit and pay (single-use `purchaseRef` still prevents double-redemption).
 - Supports dynamic pricing and optional integrator fees.
 - Use this for Telegram bot flows, seller-issued order links, private links, custom pricing, and partner or integrator checkouts.
 
 ### Fixed-price receipt flow
-
-Buyer Proof Mode fits inside the fixed-price path.
 
 1. Create a fixed-price listing with `createListing(listingHash, unitPrice, ListingMode.PublicFixedPrice)`. The `unitPrice` is immutable for the lifetime of the listing; to change a product's price, create a new listing.
 2. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
@@ -129,15 +123,15 @@ Seller Payment Link Mode fits inside the signed quote path and is the recommende
 
 1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the protocol-scoped `purchaseRef` hash.
 2. Seller optionally authorizes a backend or service key for the listing with `setListingQuoteSigner(listingId, signer, true)`.
-3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
-4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
-5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a quote signer authorized for `quote.listingId` at purchase time.
-6. `ReceiptPurchased` confirms payment, and the seller fulfills the order off-chain.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, `agentId`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
+4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)`. Pass `address(0)` for `claimedSigner` when the listing seller signed; pass the delegate's address when an authorized quote signer signed.
+5. The contract checks that `claimedSigner` is the seller or authorized for `quote.listingId`, then verifies the EIP-712 signature against it. Both checks must pass.
+6. `ReceiptPurchasedV2` confirms payment, and the seller fulfills the order off-chain.
 
 Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery. `issuedAt` is the seller-declared quote issuance timestamp and part of the signed EIP-712 payload. A signed quote is valid only between `issuedAt` and `expiresAt`, and `expiresAt - issuedAt` must not exceed `MAX_QUOTE_TTL`.
 `metadataHash` must be non-zero and should commit to the readable off-chain payment-link or checkout metadata the seller intends to authorize.
 
-Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer)` when a frontend, bot, or backend wants the same validation path as `purchaseSignedReceipt` without moving funds or creating a receipt.
+Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer, claimedSigner)` when a frontend, bot, or backend wants the same validation path as `purchaseSignedReceipt` without moving funds or creating a receipt. It returns a `SignedReceiptPurchaseValidation` struct.
 
 Use `previewSignedReceiptPurchase(quote)` only for fee math. It does not verify the seller signature, buyer match, expiry, listing active status, or replay state.
 
@@ -153,7 +147,7 @@ This lets marketplaces, bots, checkout frontends, dashboards, and other seller t
 
 A listing-authorized quote signer is trusted to set the full signed quote intent for that listing, including `amount`, `metadataHash`, `buyer`, `purchaseRef`, and optional integrator fee fields. The contract enforces protocol fee caps and quote validity, but it does not know whether a delegated signer chose the seller's intended price, metadata, buyer binding, purchase reference, or integrator fee recipient.
 
-On purchase, the Reveal Protocol pays:
+On purchase, the Nota pays:
 
 1. protocol fee
 2. integrator fee, if present
@@ -167,8 +161,8 @@ TypeScript signing shape:
 
 ```ts
 const domain = {
-  name: "RevealReceiptStore",
-  version: "1",
+  name: "NotaReceiptStore",
+  version: "2",
   chainId,
   verifyingContract: receiptStoreAddress,
 };
@@ -181,6 +175,7 @@ const types = {
     { name: "purchaseRef", type: "bytes32" },
     { name: "amount", type: "uint256" },
     { name: "metadataHash", type: "bytes32" },
+    { name: "agentId", type: "bytes32" },
     { name: "settlementToken", type: "address" },
     { name: "purchaseRefRegistry", type: "address" },
     { name: "integratorFeeRecipient", type: "address" },
@@ -197,6 +192,7 @@ const message = {
   purchaseRef,
   amount,
   metadataHash, // hash of seller-defined readable checkout metadata
+  agentId: "0x0000000000000000000000000000000000000000000000000000000000000000", // zero means unspecified
   settlementToken,
   purchaseRefRegistry,
   integratorFeeRecipient, // zero address when no integrator fee is used
@@ -213,7 +209,7 @@ The `seller` field in typed data is always the listing seller address, even when
 The signed EIP-712 type is:
 
 ```text
-SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)
+SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,bytes32 agentId,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)
 ```
 
 ## Quote Signer Security
@@ -257,13 +253,13 @@ Use JSON Canonicalization Scheme (JCS)-style serialization (stable key order, no
 hashing. **Never** hash raw `JSON.stringify()` output unless the runtime guarantees deterministic key
 ordering and value normalization.
 
-Recommended v1 shape (`schema: "zkreveal.checkout.metadata.v1"`):
+Recommended v1 shape (`schema: "nota.checkout.metadata.v1"`):
 
 ```json
 {
-  "schema": "zkreveal.checkout.metadata.v1",
+  "schema": "nota.checkout.metadata.v1",
   "protocol": {
-    "name": "Reveal Protocol",
+    "name": "Nota",
     "version": "1",
     "chainId": 421614,
     "receiptStore": "0x...",
@@ -317,7 +313,7 @@ metadata lives in the seller backend, merchant API, bot session, or dashboard.
 
 ### Purchase References
 
-In Receipt Mode, the Reveal Protocol separates the human-readable off-chain order reference from the
+In Receipt Mode, the Nota separates the human-readable off-chain order reference from the
 on-chain receipt identifier.
 
 - `rawPurchaseRef` is generated by the seller, bot, frontend, or backend.
@@ -325,15 +321,16 @@ on-chain receipt identifier.
 - `purchaseRef` is the protocol-scoped `bytes32` hash submitted to settlement contracts.
 - Canonical replay protection is enforced through `PurchaseRefRegistry.consume(purchaseRef)`, which
   only authorized settlement modules may call.
-- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]` remains in `RevealReceiptStore` only as
-  a deterministic reconciliation helper for that store's own receipts.
-- The canonical hash is scoped by the Reveal Protocol domain string
-  `zkReveal.purchaseRef.receipt.v1`, `chainId`, settlement token
+- `NotaReceiptStore` keeps no per-receipt storage. The `ReceiptPurchasedV2` event is the receipt
+  record, and `purchaseRef` is an indexed topic, so resolving a purchase reference to its
+  settlement is an `eth_getLogs` filter — no indexer required.
+- The canonical hash is scoped by the Nota domain string
+  `nota.purchaseRef.receipt.v1`, `chainId`, settlement token
   address, seller address, the raw purchase reference, and the secret purchase ref nonce.
 
 ```solidity
 purchaseRef = keccak256(abi.encode(
-    "zkReveal.purchaseRef.receipt.v1",
+    "nota.purchaseRef.receipt.v1",
     block.chainid,
     address(settlementToken),
     seller,
@@ -350,7 +347,7 @@ external system, not describe the buyer or purchased content.
 It is not included in the final hash.
 
 Because replay protection is enforced on the final `purchaseRef` hash through a shared
-`PurchaseRefRegistry`, the same `purchaseRef` cannot be reused across current or future Reveal Protocol
+`PurchaseRefRegistry`, the same `purchaseRef` cannot be reused across current or future Nota
 settlement contracts that share that registry. This also prevents accidental replay across
 different listings for the same seller raw order reference. Sellers should still treat each
 `rawPurchaseRef` as a unique operational order ID and avoid reusing it across orders.
@@ -366,7 +363,7 @@ hash:
 
 ```ts
 // rawPurchaseRef is the business identifier; purchaseRefNonce is the secret entropy.
-const rawPurchaseRef = `rev_topup_${crypto.randomUUID().replaceAll("-", "")}`;
+const rawPurchaseRef = `nota_topup_${crypto.randomUUID().replaceAll("-", "")}`;
 const purchaseRefNonce = ethers.hexlify(crypto.getRandomValues(new Uint8Array(32))); // secret, 32 bytes
 const purchaseRef = await receiptStore.hashPurchaseRef(seller, listingId, rawPurchaseRef, purchaseRefNonce);
 ```
@@ -376,12 +373,12 @@ both a human/business `rawPurchaseRef` and a secret `bytes32 purchaseRefNonce`:
 
 ```
 purchaseRef = keccak256(abi.encode(
-    "zkReveal.purchaseRef.receipt.v1", chainId, settlementToken, seller, rawPurchaseRef, purchaseRefNonce));
+    "nota.purchaseRef.receipt.v1", chainId, settlementToken, seller, rawPurchaseRef, purchaseRefNonce));
 ```
 
 - `rawPurchaseRef` — the business identifier. Recommended canonical form `<namespace>_<context>_<random>`
   (issuing brand slug, lowercased flow/service id, opaque suffix), e.g.
-  `rev_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`. With a nonce present, a plain human-readable ref such
+  `nota_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`. With a nonce present, a plain human-readable ref such
   as `invoice-123` is also acceptable.
 - `purchaseRefNonce` — a **secret, high-entropy 32-byte salt** generated with a CSPRNG. This is where
   the cryptographic strength comes from: even a guessable `rawPurchaseRef` cannot be brute-forced into
@@ -420,7 +417,7 @@ delivery-verification system.
 
 ## Source of Truth
 
-`ListingCreated` and `ReceiptPurchased` are the source-of-truth events for listing and receipt
+`ListingCreated` and `ReceiptPurchasedV2` are the source-of-truth events for listing and receipt
 discovery by seller bots, backends, dashboards, and indexers.
 Signed quote purchases emit the signed `metadataHash`; direct fixed-price purchases emit `bytes32(0)`.
 `SellerPaid` records the seller net amount after protocol and integrator fees. `ProtocolFeePaid`
@@ -437,12 +434,70 @@ If seller systems also need product context, they should resolve it off-chain fr
 The contract also stores:
 
 - `PurchaseRefRegistry.consumptions[purchaseRef]` as the canonical replay-protection record
-- `receiptIdBySellerAndPurchaseRef[seller][purchaseRef]`
-- `receipts[receiptId]`
-- `listingCountBySeller[seller]` only to enforce `MAX_LISTINGS_PER_SELLER`
+- `listingCountBySeller[seller]`, the number of listings a seller currently has active, only to enforce `MAX_LISTINGS_PER_SELLER`
 
-`receiptIdBySellerAndPurchaseRef` is not the replay-protection source of truth. It is a local
-lookup helper for seller and indexer reconciliation after settlement.
+Receipts themselves are not stored on-chain. Writing the six-field receipt struct plus a
+seller-scoped lookup mapping cost roughly 155k gas per purchase and nothing on-chain read it:
+replay protection lives in `PurchaseRefRegistry`, and discovery comes from events. The
+`ReceiptPurchasedV2` event carries every field the struct held; `issuedAt` was always
+`block.timestamp`, which the log's own block supplies.
+
+## Signer Verification and Quote Lifetime
+
+Quotes are verified with OpenZeppelin's `SignatureChecker`, which accepts both EOA signatures and
+ERC-1271 contract-wallet signatures. This is what allows a seller using a smart wallet — Coinbase
+Smart Wallet, Safe — to sign quotes at all. `ECDSA.recover` cannot authenticate a contract account:
+there is no key to recover.
+
+Because `SignatureChecker` verifies a *supplied* candidate signer rather than recovering one, and
+`authorizedQuoteSigners` cannot be enumerated on-chain, the caller names the signer:
+
+- `claimedSigner = address(0)` — the listing seller signed. The common case.
+- `claimedSigner = <delegate>` — a signer authorized for that listing signed.
+
+Naming an address asserts nothing. The address must clear the authorization mapping *and* the
+signature must verify against it, so a caller cannot promote an unauthorized signer by pointing at
+one.
+
+### Contract-wallet signatures are revocable
+
+This is a change to the quote lifetime model, not just to the verification code.
+
+An ECDSA signature is valid forever once produced. An ERC-1271 signature is only valid while the
+wallet still says it is — which is what the `Now` in `isValidSignatureNow` means. **A seller who
+rotates the owners of their smart wallet invalidates every quote that wallet has already signed,
+including quotes that have not expired.** Outstanding payment links stop working at the moment of
+rotation, silently, with no on-chain event marking it.
+
+Practical consequences:
+
+- `expiresAt` is no longer the only thing that can end a quote's life.
+- After rotating wallet keys, a seller must re-issue any outstanding payment links.
+- A checkout flow should re-run `validateSignedReceiptPurchase` immediately before prompting a
+  buyer to pay, rather than trusting a validation performed when the link was generated.
+
+Sellers using an EOA are unaffected.
+
+## Agent Attribution
+
+`SignedReceiptQuote.agentId` is an opaque `bytes32` carried for ERC-8004-style agent attribution
+and emitted in `ReceiptPurchasedV2`. It is `bytes32` rather than a typed identifier so the protocol
+is not coupled to any registry's ID representation: it may be a registry-scoped identifier or a
+hash of one. Zero means unspecified, is always valid, and is what the direct `purchaseReceipt` path
+always emits.
+
+The contract performs no validation on `agentId` and resolves it against no registry. Hard-coding a
+registry address would create exactly the coupling the opaque type avoids, so resolution is an
+off-chain concern.
+
+**`agentId` is seller-attested, not chain-verified.** It records that the seller claims to have
+sold to the agent bearing that identifier. The seller signs it, so a buyer cannot attach an agent
+identity the seller did not attest to — but the attestation is only as good as the seller's own
+verification of the agent's claim. The chain does not check it, and nothing here should be read as
+though it does.
+
+The seller signs it for the same reason the seller signs `metadataHash`: the buyer is the agent,
+and a self-declared identity is worthless.
 
 ## Fee Model
 
@@ -461,7 +516,7 @@ Constraints:
 - `integratorFeeRecipient` must be the zero address when `integratorFeeAmount = 0`
 - `integratorFeeRecipient` must be non-zero when `integratorFeeAmount > 0`
 - official v1 deployments are intended for a 6-decimal settlement token such as USDC
-- `MIN_PURCHASE_AMOUNT = 1e6` assumes 6 decimals and means 1 USDC
+- `MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC
 - there is no protocol-level maximum purchase amount in this contract
 - large purchases are controlled by seller quote policy, frontend/backend limits, token allowance and balance, and operational risk controls
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless constants are adjusted in a future version
@@ -473,7 +528,7 @@ There is no dynamic fee mutation in v1.
 
 ## Safety Controls
 
-`RevealReceiptStore` is owned and uses `Ownable2Step` for admin transfers.
+`NotaReceiptStore` is owned and uses `Ownable2Step` for admin transfers.
 
 The owner can independently pause:
 
@@ -483,21 +538,40 @@ The owner can independently pause:
 
 v1 also enforces conservative protocol limits:
 
-- min purchase: 1 USDC (`1e6`) assuming a 6-decimal settlement token
+- min purchase: 0.0001 USDC (`1e2`) assuming a 6-decimal settlement token
 - max quote TTL: 24 hours
-- max listings per seller: 500
+- max listings per seller: 500 active at once
+
+`MAX_LISTINGS_PER_SELLER` is a concurrency cap, not a lifetime one. Deactivating a listing with
+`setListingActive(listingId, false)` releases its slot, and reactivating reclaims one and re-checks
+the cap. A seller who changes prices by superseding listings — the only way to change a price,
+since `unitPrice` is immutable — does not permanently spend their budget. The trade is that
+reactivating an old listing can fail if the seller has since filled the cap.
+
+### Ownership
+
+`renounceOwnership()` reverts while any pause flag is set — `purchasesPaused`,
+`listingCreationPaused`, or `quoteSignerUpdatesPaused`. Only the owner can clear a pause, so
+renouncing mid-pause strands the contract in that state permanently, with no recovery path: no
+buyer could purchase, no seller could list, or no seller could rotate a compromised quote signer.
+Clear the pauses first, then renounce. Renouncing while unpaused is permitted and, as always,
+irreversible.
 - max quote signers per seller: 3
 
 Integration guide:
 
 - [`docs/receipt-mode-integration.md`](docs/receipt-mode-integration.md)
 
+Measured gas, before and after the storage-free receipt change:
+
+- [`docs/benchmarks.md`](docs/benchmarks.md)
+
 ## Contract Surface
 
 Core contract:
 
 - `src/PurchaseRefRegistry.sol`
-- `src/RevealReceiptStore.sol`
+- `src/NotaReceiptStore.sol`
 
 Key functions:
 
@@ -515,14 +589,13 @@ Key functions:
 - `validateSignedReceiptPurchase`
 - `hashSignedReceiptQuote`
 - `isQuoteSignerAuthorized`
-- `getReceiptIdBySellerAndPurchaseRef`
 
 Key events:
 
 - `ListingCreated`
 - `ListingStatusChanged`
 - `QuoteSignerAuthorizationChanged`
-- `ReceiptPurchased`
+- `ReceiptPurchasedV2`
 - `SellerPaid`
 - `ProtocolFeePaid`
 - `IntegratorFeePaid`
@@ -542,11 +615,17 @@ forge test --offline --suppress-successful-traces
 
 ## Deployment
 
-The v1 deploy script deploys `PurchaseRefRegistry` first and then deploys `RevealReceiptStore`
+The v1 deploy script deploys `PurchaseRefRegistry` first and then deploys `NotaReceiptStore`
 with that registry address wired into the constructor.
 
 Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
-`MIN_PURCHASE_AMOUNT = 1e6` assumes 6 decimals and means 1 USDC.
+`MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC. The floor is deliberately
+low so x402 agent payments, which are typically fractions of a cent, can settle.
+
+Fee rounding at that size favours the seller. Both fees floor-divide and the caps sum to 500 bps,
+so `protocolFee + integratorFee` is at most 5% of gross and `sellerNet` is never zero. At the floor
+itself a 50 bps protocol fee rounds to zero — it needs `grossAmount >= 200` to reach one base
+unit — so on a fee-charging deployment the smallest purchases pay no protocol fee at all.
 There is no protocol-level maximum purchase amount in this contract. Large purchases are
 controlled by seller quote policy, frontend/backend limits, token allowance and balance, and
 operational risk controls.
@@ -579,7 +658,7 @@ The deploy output logs both:
 - `PurchaseRefRegistry`
 - `ReceiptStore`
 
-If a future Reveal Protocol settlement contract must share replay protection with an existing deployment,
+If a future Nota settlement contract must share replay protection with an existing deployment,
 it should be deployed against the same `PurchaseRefRegistry` address.
 
 Typical Arbitrum One mainnet flow (solo deployer, deployer == protocol owner):
@@ -624,6 +703,6 @@ After deployment, record:
 
 ## Scope
 
-Reveal Protocol v1 is intentionally focused on receipt-mode settlement and off-chain fulfillment.
+Nota v1 is intentionally focused on receipt-mode settlement and off-chain fulfillment.
 
 Future modules should be documented in their own specifications and repositories when they are designed or implemented.
