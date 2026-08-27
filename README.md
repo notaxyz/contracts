@@ -101,7 +101,7 @@ For production checkout/payment-link flows, prefer signed quotes.
 - Suitable for simple public listings where any buyer may purchase.
 - Not recommended for seller-issued private payment links, Telegram checkout links, order-specific checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
 
-### `purchaseSignedReceipt(quote, sellerSignature)`
+### `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)`
 
 - Recommended default for production checkout/payment-link flows.
 - Works for both listing modes: required for `SignedQuoteOnly`, and also supported on `PublicFixedPrice` listings.
@@ -131,14 +131,14 @@ Seller Payment Link Mode fits inside the signed quote path and is the recommende
 1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the protocol-scoped `purchaseRef` hash.
 2. Seller optionally authorizes a backend or service key for the listing with `setListingQuoteSigner(listingId, signer, true)`.
 3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
-4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature)`.
-5. The contract verifies the EIP-712 signature and accepts it when the recovered signer is the seller or a quote signer authorized for `quote.listingId` at purchase time.
+4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)`. Pass `address(0)` for `claimedSigner` when the listing seller signed; pass the delegate's address when an authorized quote signer signed.
+5. The contract checks that `claimedSigner` is the seller or authorized for `quote.listingId`, then verifies the EIP-712 signature against it. Both checks must pass.
 6. `ReceiptPurchasedV2` confirms payment, and the seller fulfills the order off-chain.
 
 Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery. `issuedAt` is the seller-declared quote issuance timestamp and part of the signed EIP-712 payload. A signed quote is valid only between `issuedAt` and `expiresAt`, and `expiresAt - issuedAt` must not exceed `MAX_QUOTE_TTL`.
 `metadataHash` must be non-zero and should commit to the readable off-chain payment-link or checkout metadata the seller intends to authorize.
 
-Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer)` when a frontend, bot, or backend wants the same validation path as `purchaseSignedReceipt` without moving funds or creating a receipt.
+Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer, claimedSigner)` when a frontend, bot, or backend wants the same validation path as `purchaseSignedReceipt` without moving funds or creating a receipt. It returns a `SignedReceiptPurchaseValidation` struct.
 
 Use `previewSignedReceiptPurchase(quote)` only for fee math. It does not verify the seller signature, buyer match, expiry, listing active status, or replay state.
 
@@ -182,6 +182,7 @@ const types = {
     { name: "purchaseRef", type: "bytes32" },
     { name: "amount", type: "uint256" },
     { name: "metadataHash", type: "bytes32" },
+    { name: "agentId", type: "bytes32" },
     { name: "settlementToken", type: "address" },
     { name: "purchaseRefRegistry", type: "address" },
     { name: "integratorFeeRecipient", type: "address" },
@@ -446,6 +447,63 @@ seller-scoped lookup mapping cost roughly 155k gas per purchase and nothing on-c
 replay protection lives in `PurchaseRefRegistry`, and discovery comes from events. The
 `ReceiptPurchasedV2` event carries every field the struct held; `issuedAt` was always
 `block.timestamp`, which the log's own block supplies.
+
+## Signer Verification and Quote Lifetime
+
+Quotes are verified with OpenZeppelin's `SignatureChecker`, which accepts both EOA signatures and
+ERC-1271 contract-wallet signatures. This is what allows a seller using a smart wallet — Coinbase
+Smart Wallet, Safe — to sign quotes at all. `ECDSA.recover` cannot authenticate a contract account:
+there is no key to recover.
+
+Because `SignatureChecker` verifies a *supplied* candidate signer rather than recovering one, and
+`authorizedQuoteSigners` cannot be enumerated on-chain, the caller names the signer:
+
+- `claimedSigner = address(0)` — the listing seller signed. The common case.
+- `claimedSigner = <delegate>` — a signer authorized for that listing signed.
+
+Naming an address asserts nothing. The address must clear the authorization mapping *and* the
+signature must verify against it, so a caller cannot promote an unauthorized signer by pointing at
+one.
+
+### Contract-wallet signatures are revocable
+
+This is a change to the quote lifetime model, not just to the verification code.
+
+An ECDSA signature is valid forever once produced. An ERC-1271 signature is only valid while the
+wallet still says it is — which is what the `Now` in `isValidSignatureNow` means. **A seller who
+rotates the owners of their smart wallet invalidates every quote that wallet has already signed,
+including quotes that have not expired.** Outstanding payment links stop working at the moment of
+rotation, silently, with no on-chain event marking it.
+
+Practical consequences:
+
+- `expiresAt` is no longer the only thing that can end a quote's life.
+- After rotating wallet keys, a seller must re-issue any outstanding payment links.
+- A checkout flow should re-run `validateSignedReceiptPurchase` immediately before prompting a
+  buyer to pay, rather than trusting a validation performed when the link was generated.
+
+Sellers using an EOA are unaffected.
+
+## Agent Attribution
+
+`SignedReceiptQuote.agentId` is an opaque `bytes32` carried for ERC-8004-style agent attribution
+and emitted in `ReceiptPurchasedV2`. It is `bytes32` rather than a typed identifier so the protocol
+is not coupled to any registry's ID representation: it may be a registry-scoped identifier or a
+hash of one. Zero means unspecified, is always valid, and is what the direct `purchaseReceipt` path
+always emits.
+
+The contract performs no validation on `agentId` and resolves it against no registry. Hard-coding a
+registry address would create exactly the coupling the opaque type avoids, so resolution is an
+off-chain concern.
+
+**`agentId` is seller-attested, not chain-verified.** It records that the seller claims to have
+sold to the agent bearing that identifier. The seller signs it, so a buyer cannot attach an agent
+identity the seller did not attest to — but the attestation is only as good as the seller's own
+verification of the agent's claim. The chain does not check it, and nothing here should be read as
+though it does.
+
+The seller signs it for the same reason the seller signs `metadataHash`: the buyer is the agent,
+and a self-declared identity is worthless.
 
 ## Fee Model
 

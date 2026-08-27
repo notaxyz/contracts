@@ -110,6 +110,7 @@ abstract contract GasBenchmarkFork is Test {
             purchaseRef: ref,
             amount: PRICE,
             metadataHash: METADATA_HASH,
+            agentId: bytes32(0),
             integratorFeeRecipient: integratorRecipient,
             integratorFeeAmount: integratorFee,
             issuedAt: uint64(block.timestamp),
@@ -158,7 +159,7 @@ abstract contract GasBenchmarkFork is Test {
 
         vm.prank(buyer);
         uint256 g0 = gasleft();
-        store.purchaseSignedReceipt(quote, sig);
+        store.purchaseSignedReceipt(quote, sig, address(0));
         uint256 used = g0 - gasleft();
 
         _report("purchaseSignedReceipt", used);
@@ -173,7 +174,7 @@ abstract contract GasBenchmarkFork is Test {
 
         vm.prank(buyer);
         uint256 g0 = gasleft();
-        store.purchaseSignedReceipt(quote, sig);
+        store.purchaseSignedReceipt(quote, sig, address(0));
         uint256 used = g0 - gasleft();
 
         _report("purchaseSignedReceipt.integratorFee", used);

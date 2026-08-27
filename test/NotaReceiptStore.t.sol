@@ -10,6 +10,39 @@ import {Vm} from "forge-std/Vm.sol";
 import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
 import {NotaReceiptStore} from "../src/NotaReceiptStore.sol";
 
+/// @dev Minimal ERC-1271 contract wallet, standing in for Coinbase Smart Wallet. Signature
+///      validity depends on the *current* owner, so rotating the owner invalidates signatures the
+///      wallet previously produced -- the behaviour `SignatureChecker.isValidSignatureNow` is
+///      named for.
+contract MockSmartWallet {
+    bytes4 internal constant ERC1271_MAGIC_VALUE = 0x1626ba7e;
+
+    address public owner;
+
+    constructor(address owner_) {
+        owner = owner_;
+    }
+
+    function rotateOwner(address newOwner) external {
+        owner = newOwner;
+    }
+
+    function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4) {
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(hash, signature);
+        if (err == ECDSA.RecoverError.NoError && recovered == owner) {
+            return ERC1271_MAGIC_VALUE;
+        }
+        return 0xffffffff;
+    }
+}
+
+/// @dev An ERC-1271 wallet that rejects everything, standing in for a hostile or broken wallet.
+contract RejectingSmartWallet {
+    function isValidSignature(bytes32, bytes calldata) external pure returns (bytes4) {
+        return 0xffffffff;
+    }
+}
+
 contract ReceiptMockUSDC is ERC20 {
     constructor() ERC20("Mock USDC", "USDC") {}
 
@@ -38,7 +71,7 @@ contract NotaReceiptStoreHarness is NotaReceiptStore {
         address expectedBuyer
     ) external nonReentrant listingExists(quote.listingId) returns (uint256 receiptId) {
         if (purchasesPaused) revert PurchasesPaused();
-        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, expectedBuyer);
+        Listing storage listing = _verifySignedReceiptQuote(quote, sellerSignature, expectedBuyer, address(0));
 
         return _settleVerifiedSignedReceiptQuote(listing, quote, payer, expectedBuyer);
     }
@@ -50,15 +83,18 @@ contract NotaReceiptStoreHarness is NotaReceiptStore {
         address expectedBuyer
     ) internal returns (uint256 receiptId) {
         return _settleReceiptPurchase(
-            quote.listingId,
-            listing.seller,
-            payer,
-            expectedBuyer,
-            quote.amount,
-            quote.purchaseRef,
-            quote.metadataHash,
-            quote.integratorFeeRecipient,
-            quote.integratorFeeAmount
+            ReceiptSettlement({
+                listingId: quote.listingId,
+                seller: listing.seller,
+                payer: payer,
+                receiptBuyer: expectedBuyer,
+                amount: quote.amount,
+                purchaseRef: quote.purchaseRef,
+                metadataHash: quote.metadataHash,
+                agentId: quote.agentId,
+                integratorFeeRecipient: quote.integratorFeeRecipient,
+                integratorFeeAmount: quote.integratorFeeAmount
+            })
         );
     }
 }
@@ -260,6 +296,7 @@ contract NotaReceiptStoreTest is Test {
             purchaseRef: ref,
             amount: amount,
             metadataHash: metadataHash,
+            agentId: bytes32(0),
             integratorFeeRecipient: integratorFeeRecipient,
             integratorFeeAmount: integratorFeeAmount,
             issuedAt: uint64(block.timestamp),
@@ -283,9 +320,22 @@ contract NotaReceiptStoreTest is Test {
         NotaReceiptStore.SignedReceiptQuote memory quote,
         bytes memory sellerSignature
     ) internal returns (uint256 receiptId) {
+        receiptId = _purchaseSignedReceiptAs(targetStore, who, quote, sellerSignature, address(0));
+    }
+
+    /// @dev `claimedSigner` names the address that produced the signature; `address(0)` means the
+    ///      listing seller. A quote signed by a listing-authorized signer must name that signer,
+    ///      because `SignatureChecker` verifies a supplied candidate rather than recovering one.
+    function _purchaseSignedReceiptAs(
+        NotaReceiptStore targetStore,
+        address who,
+        NotaReceiptStore.SignedReceiptQuote memory quote,
+        bytes memory sellerSignature,
+        address claimedSigner
+    ) internal returns (uint256 receiptId) {
         vm.startPrank(who);
         usdc.approve(address(targetStore), quote.amount);
-        receiptId = targetStore.purchaseSignedReceipt(quote, sellerSignature);
+        receiptId = targetStore.purchaseSignedReceipt(quote, sellerSignature, claimedSigner);
         vm.stopPrank();
     }
 
@@ -325,6 +375,7 @@ contract NotaReceiptStoreTest is Test {
                 quote.purchaseRef,
                 quote.amount,
                 quote.metadataHash,
+                quote.agentId,
                 address(targetStore.SETTLEMENT_TOKEN()),
                 address(targetStore.PURCHASE_REF_REGISTRY()),
                 quote.integratorFeeRecipient,
@@ -378,14 +429,15 @@ contract NotaReceiptStoreTest is Test {
         bytes32 purchaseRef;
         uint256 amount;
         bytes32 metadataHash;
+        bytes32 agentId;
     }
 
     bytes32 internal constant RECEIPT_PURCHASED_TOPIC =
-        keccak256("ReceiptPurchasedV2(uint256,address,address,uint256,bytes32,uint256,bytes32)");
+        keccak256("ReceiptPurchasedV2(uint256,address,address,uint256,bytes32,uint256,bytes32,bytes32)");
 
     /// @dev Most recent `ReceiptPurchasedV2` emitted since logs were last drained. `setUp` starts
     ///      recording, so any test can call this after a purchase.
-    function _lastEmittedReceipt() internal returns (EmittedReceipt memory receipt) {
+    function _lastEmittedReceipt() internal view returns (EmittedReceipt memory receipt) {
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         for (uint256 i = logs.length; i > 0; i--) {
@@ -395,8 +447,8 @@ contract NotaReceiptStoreTest is Test {
             receipt.seller = address(uint160(uint256(entry.topics[1])));
             receipt.buyer = address(uint160(uint256(entry.topics[2])));
             receipt.purchaseRef = entry.topics[3];
-            (receipt.receiptId, receipt.listingId, receipt.amount, receipt.metadataHash) =
-                abi.decode(entry.data, (uint256, uint256, uint256, bytes32));
+            (receipt.receiptId, receipt.listingId, receipt.amount, receipt.metadataHash, receipt.agentId) =
+                abi.decode(entry.data, (uint256, uint256, uint256, bytes32, bytes32));
             return receipt;
         }
 
@@ -666,7 +718,7 @@ contract NotaReceiptStoreTest is Test {
             _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quoteAmount, uint64(block.timestamp + 1 hours));
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
-        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+        _purchaseSignedReceiptAs(store, buyer, quote, signature);
 
         assertEq(_lastEmittedReceipt().amount, quoteAmount);
     }
@@ -817,7 +869,7 @@ contract NotaReceiptStoreTest is Test {
         assertEq(
             store.SIGNED_RECEIPT_QUOTE_TYPEHASH(),
             keccak256(
-                "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)"
+                "SignedReceiptQuote(uint256 listingId,address seller,address buyer,bytes32 purchaseRef,uint256 amount,bytes32 metadataHash,bytes32 agentId,address settlementToken,address purchaseRefRegistry,address integratorFeeRecipient,uint256 integratorFeeAmount,uint64 issuedAt,uint64 expiresAt)"
             )
         );
     }
@@ -1084,7 +1136,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.PurchasesPaused.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1134,7 +1186,9 @@ contract NotaReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit NotaReceiptStore.SellerPaid(1, listingId, seller, unitPrice);
         vm.expectEmit(true, true, true, true);
-        emit NotaReceiptStore.ReceiptPurchasedV2(1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0));
+        emit NotaReceiptStore.ReceiptPurchasedV2(
+            1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0), bytes32(0)
+        );
 
         uint256 receiptId = store.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
@@ -1159,7 +1213,7 @@ contract NotaReceiptStoreTest is Test {
         string memory rawPurchaseRef = _makeRawPurchaseRef(5);
         bytes32 canonicalPurchaseRef = store.hashPurchaseRef(seller, listingId, rawPurchaseRef, purchaseRefNonce);
 
-        uint256 receiptId = _purchaseReceiptAs(listingId, buyer, canonicalPurchaseRef);
+        _purchaseReceiptAs(listingId, buyer, canonicalPurchaseRef);
 
         EmittedReceipt memory receipt = _lastEmittedReceipt();
         assertEq(receipt.purchaseRef, canonicalPurchaseRef);
@@ -1196,7 +1250,9 @@ contract NotaReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit NotaReceiptStore.SellerPaid(1, listingId, seller, unitPrice - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit NotaReceiptStore.ReceiptPurchasedV2(1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0));
+        emit NotaReceiptStore.ReceiptPurchasedV2(
+            1, seller, buyer, listingId, purchaseRef, unitPrice, bytes32(0), bytes32(0)
+        );
 
         feeStore.purchaseReceipt(listingId, purchaseRef, unitPrice);
         vm.stopPrank();
@@ -1411,9 +1467,11 @@ contract NotaReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit NotaReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit NotaReceiptStore.ReceiptPurchasedV2(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
+        emit NotaReceiptStore.ReceiptPurchasedV2(
+            1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash, bytes32(0)
+        );
 
-        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature, quoteSigner);
         vm.stopPrank();
 
         EmittedReceipt memory receipt = _lastEmittedReceipt();
@@ -1443,7 +1501,7 @@ contract NotaReceiptStoreTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, address(unauthorizedStore))
         );
-        unauthorizedStore.purchaseSignedReceipt(quote, signature);
+        unauthorizedStore.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1470,9 +1528,11 @@ contract NotaReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit NotaReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit NotaReceiptStore.ReceiptPurchasedV2(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
+        emit NotaReceiptStore.ReceiptPurchasedV2(
+            1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash, bytes32(0)
+        );
 
-        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
 
         EmittedReceipt memory receipt = _lastEmittedReceipt();
@@ -1522,9 +1582,11 @@ contract NotaReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit NotaReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee - integratorFeeAmount);
         vm.expectEmit(true, true, true, true);
-        emit NotaReceiptStore.ReceiptPurchasedV2(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
+        emit NotaReceiptStore.ReceiptPurchasedV2(
+            1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash, bytes32(0)
+        );
 
-        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
 
         EmittedReceipt memory receipt = _lastEmittedReceipt();
@@ -1582,7 +1644,7 @@ contract NotaReceiptStoreTest is Test {
             vm.startPrank(buyer);
             usdc.approve(address(zeroFeeStore), quotedAmount);
             vm.recordLogs();
-            zeroFeeStore.purchaseSignedReceipt(quote, signature);
+            zeroFeeStore.purchaseSignedReceipt(quote, signature, address(0));
             vm.stopPrank();
         }
 
@@ -1633,7 +1695,7 @@ contract NotaReceiptStoreTest is Test {
         bytes memory signature = _signSignedReceiptQuote(feeStore, SELLER_PK, quote);
         uint256 protocolFee = quotedAmount * 50 / 10_000;
 
-        uint256 receiptId = _purchaseSignedReceiptAs(feeStore, buyer, quote, signature);
+        _purchaseSignedReceiptAs(feeStore, buyer, quote, signature);
 
         NotaReceiptStore.Listing memory listing = feeStore.getListing(listingId);
         EmittedReceipt memory receipt = _lastEmittedReceipt();
@@ -1651,7 +1713,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1668,7 +1730,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1686,7 +1748,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(feeStore), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
-        feeStore.purchaseSignedReceipt(quote, signature);
+        feeStore.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1699,7 +1761,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(attacker);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.QuoteBuyerMismatch.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1808,7 +1870,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.QuoteExpired.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1824,7 +1886,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.QuoteExpired.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1849,9 +1911,11 @@ contract NotaReceiptStoreTest is Test {
         vm.expectEmit(true, true, true, true);
         emit NotaReceiptStore.SellerPaid(1, listingId, seller, quotedAmount - protocolFee);
         vm.expectEmit(true, true, true, true);
-        emit NotaReceiptStore.ReceiptPurchasedV2(1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash);
+        emit NotaReceiptStore.ReceiptPurchasedV2(
+            1, seller, buyer, listingId, purchaseRef, quotedAmount, metadataHash, bytes32(0)
+        );
 
-        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature);
+        uint256 receiptId = feeStore.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
 
         EmittedReceipt memory receipt = _lastEmittedReceipt();
@@ -1872,7 +1936,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.QuoteExpiryTooLong.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1889,7 +1953,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.QuoteExpiryTooLong.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1926,7 +1990,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidParams.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1941,7 +2005,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidParams.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1955,7 +2019,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quote.amount);
         vm.expectRevert(NotaReceiptStore.AmountOutOfBounds.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -1966,7 +2030,7 @@ contract NotaReceiptStoreTest is Test {
         );
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
-        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+        _purchaseSignedReceiptAs(store, buyer, quote, signature);
         assertEq(_lastEmittedReceipt().amount, store.MIN_PURCHASE_AMOUNT());
     }
 
@@ -2050,6 +2114,170 @@ contract NotaReceiptStoreTest is Test {
         assertEq(protocolFee + integratorFee + sellerNet, amount);
     }
 
+    // -------------------------------------------------------------------------
+    // ERC-1271 contract-wallet sellers
+    // -------------------------------------------------------------------------
+
+    function _createWalletListing(MockSmartWallet wallet) internal returns (uint256 listingId) {
+        vm.prank(address(wallet));
+        listingId = store.createListing(listingHash, unitPrice, NotaReceiptStore.ListingMode.PublicFixedPrice);
+    }
+
+    /// @dev The reason for SignatureChecker: a Coinbase Smart Wallet seller is a contract account
+    ///      with no key to recover, so ECDSA.recover could never authenticate one.
+    function test_PurchaseSignedReceipt_ContractWalletSellerCanSignQuote() public {
+        MockSmartWallet wallet = new MockSmartWallet(vm.addr(SELLER2_PK));
+        uint256 listingId = _createWalletListing(wallet);
+
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER2_PK, quote);
+
+        uint256 walletBalanceBefore = usdc.balanceOf(address(wallet));
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+
+        assertEq(receiptId, 1);
+        assertEq(_lastEmittedReceipt().seller, address(wallet));
+        assertEq(usdc.balanceOf(address(wallet)), walletBalanceBefore + quotedAmount);
+    }
+
+    /// @dev The quote-lifetime consequence of ERC-1271: contract signatures are revocable, so a
+    ///      seller rotating wallet owners invalidates every quote that wallet already signed, even
+    ///      unexpired ones. ECDSA signatures never behave this way. Outstanding payment links
+    ///      break at rotation, which integrators have to plan for.
+    function test_PurchaseSignedReceipt_ContractWalletOwnerRotationInvalidatesUnexpiredQuote() public {
+        MockSmartWallet wallet = new MockSmartWallet(vm.addr(SELLER2_PK));
+        uint256 listingId = _createWalletListing(wallet);
+
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER2_PK, quote);
+
+        // Still well inside the quote's validity window.
+        wallet.rotateOwner(vm.addr(ATTACKER_PK));
+        vm.warp(block.timestamp + 1 hours);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(quote, signature, address(0));
+        vm.stopPrank();
+
+        _assertRegistryNotConsumed(purchaseRef);
+    }
+
+    /// @dev A wallet that rejects or reverts must fail the purchase cleanly rather than trapping
+    ///      the transaction: SignatureChecker returns false instead of bubbling.
+    function test_PurchaseSignedReceipt_RejectingContractWalletRevertsInvalidQuoteSigner() public {
+        RejectingSmartWallet wallet = new RejectingSmartWallet();
+        vm.prank(address(wallet));
+        uint256 listingId = store.createListing(listingHash, unitPrice, NotaReceiptStore.ListingMode.PublicFixedPrice);
+
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(quote, signature, address(0));
+        vm.stopPrank();
+    }
+
+    // -------------------------------------------------------------------------
+    // claimedSigner
+    // -------------------------------------------------------------------------
+
+    /// @dev Asserting a signer proves nothing. An address that is not authorized for the listing
+    ///      fails the mapping lookup no matter who submits the call.
+    function test_PurchaseSignedReceipt_ClaimedSignerNotAuthorizedReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(quote, signature, attacker);
+        vm.stopPrank();
+    }
+
+    /// @dev Naming an authorized signer does not let a different signer's signature through.
+    ///      Authorization and verification are both required.
+    function test_PurchaseSignedReceipt_ClaimedSignerAuthorizedButWrongSignatureReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        _setListingQuoteSigner(store, seller, listingId, quoteSigner, true);
+
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        // Signed by the seller, but the caller claims the authorized delegate produced it.
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(quote, signature, quoteSigner);
+        vm.stopPrank();
+    }
+
+    /// @dev Naming the seller explicitly is equivalent to passing zero, which matters because a
+    ///      seller can never appear in their own authorizedQuoteSigners mapping.
+    function test_PurchaseSignedReceipt_ClaimedSignerMayNameTheSellerExplicitly() public {
+        uint256 listingId = _createListingAsSeller();
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        assertFalse(store.authorizedQuoteSigners(listingId, seller));
+        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature, seller);
+        assertEq(receiptId, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // agentId
+    // -------------------------------------------------------------------------
+
+    function test_PurchaseSignedReceipt_AgentIdRoundTripsThroughTheEvent() public {
+        bytes32 agentId = keccak256("erc8004:agent:42");
+        uint256 listingId = _createListingAsSeller();
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        quote.agentId = agentId;
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        _purchaseSignedReceiptAs(store, buyer, quote, signature);
+
+        assertEq(_lastEmittedReceipt().agentId, agentId);
+    }
+
+    /// @dev agentId is inside the signed payload, so a buyer cannot attach an agent identity the
+    ///      seller did not attest to. That is what makes the attestation worth anything.
+    function test_PurchaseSignedReceipt_TamperedAgentIdInvalidatesSignature() public {
+        uint256 listingId = _createListingAsSeller();
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 days));
+        quote.agentId = keccak256("erc8004:agent:42");
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        quote.agentId = keccak256("erc8004:agent:999");
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
+        store.purchaseSignedReceipt(quote, signature, address(0));
+        vm.stopPrank();
+    }
+
+    /// @dev Zero means unspecified and must stay valid: most purchases carry no agent, and the
+    ///      direct path cannot express one at all.
+    function test_PurchaseReceipt_DirectPathEmitsZeroAgentId() public {
+        uint256 listingId = _createListingAsSeller();
+        _purchaseReceiptAs(listingId, buyer, purchaseRef);
+
+        assertEq(_lastEmittedReceipt().agentId, bytes32(0));
+    }
+
     function test_PurchaseSignedReceipt_LargeQuoteAmountSucceeds() public {
         uint256 listingId = _createListingAsSeller();
         NotaReceiptStore.SignedReceiptQuote memory quote = _makeSignedReceiptQuote(
@@ -2057,7 +2285,7 @@ contract NotaReceiptStoreTest is Test {
         );
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
-        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
+        _purchaseSignedReceiptAs(store, buyer, quote, signature);
         assertEq(_lastEmittedReceipt().amount, largePurchaseAmount);
     }
 
@@ -2071,7 +2299,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidParams.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2085,7 +2313,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidParams.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2106,7 +2334,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.IntegratorFeeTooHigh.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2119,7 +2347,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidPurchaseRef.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2133,7 +2361,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidParams.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2148,7 +2376,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
 
         assertEq(receiptId, 1);
@@ -2166,7 +2394,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.ListingInactive.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2182,11 +2410,12 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
-        store.purchaseSignedReceipt(otherListingQuote, otherListingSignature);
+        store.purchaseSignedReceipt(otherListingQuote, otherListingSignature, quoteSigner);
         vm.stopPrank();
 
         _setListingQuoteSigner(store, seller, otherListingId, quoteSigner, true);
-        uint256 otherListingReceiptId = _purchaseSignedReceiptAs(store, buyer, otherListingQuote, otherListingSignature);
+        uint256 otherListingReceiptId =
+            _purchaseSignedReceiptAs(store, buyer, otherListingQuote, otherListingSignature, quoteSigner);
         assertEq(otherListingReceiptId, 1);
         _assertRegistryConsumption(purchaseRef, address(store));
 
@@ -2195,7 +2424,8 @@ contract NotaReceiptStoreTest is Test {
         bytes memory authorizedListingSignature =
             _signSignedReceiptQuote(store, QUOTE_SIGNER_PK, authorizedListingQuote);
 
-        uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, authorizedListingQuote, authorizedListingSignature);
+        uint256 receiptId =
+            _purchaseSignedReceiptAs(store, buyer, authorizedListingQuote, authorizedListingSignature, quoteSigner);
         assertEq(receiptId, 2);
         _assertRegistryConsumption(purchaseRef2, address(store));
     }
@@ -2213,7 +2443,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
-        store.purchaseSignedReceipt(seller2Quote, signature);
+        store.purchaseSignedReceipt(seller2Quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2235,7 +2465,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.purchaseSignedReceipt(quote2, signature2);
+        store.purchaseSignedReceipt(quote2, signature2, address(0));
         vm.stopPrank();
     }
 
@@ -2258,7 +2488,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer2);
         usdc.approve(address(secondStore), quotedAmount);
         vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
-        secondStore.purchaseSignedReceipt(quote2, signature2);
+        secondStore.purchaseSignedReceipt(quote2, signature2, address(0));
         vm.stopPrank();
     }
 
@@ -2280,12 +2510,14 @@ contract NotaReceiptStoreTest is Test {
                 purchaseRef: quote.purchaseRef,
                 amount: quote.amount,
                 metadataHash: quote.metadataHash,
+                agentId: quote.agentId,
                 integratorFeeRecipient: quote.integratorFeeRecipient,
                 integratorFeeAmount: quote.integratorFeeAmount,
                 issuedAt: quote.issuedAt,
                 expiresAt: quote.expiresAt
             }),
-            signature
+            signature,
+            address(0)
         );
         vm.stopPrank();
     }
@@ -2298,7 +2530,7 @@ contract NotaReceiptStoreTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert();
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
 
         _assertRegistryNotConsumed(purchaseRef);
     }
@@ -2493,7 +2725,7 @@ contract NotaReceiptStoreTest is Test {
         vm.startPrank(buyer);
         usdc.approve(address(store), quotedAmount);
         vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
-        store.purchaseSignedReceipt(quote, signature);
+        store.purchaseSignedReceipt(quote, signature, address(0));
         vm.stopPrank();
     }
 
@@ -2515,27 +2747,18 @@ contract NotaReceiptStoreTest is Test {
         );
         bytes memory signature = _signSignedReceiptQuote(feeStore, QUOTE_SIGNER_PK, quote);
 
-        (
-            uint256 grossAmount,
-            uint256 protocolFee,
-            uint256 integratorFee,
-            uint256 sellerNet,
-            address protocolFeeRecipient,
-            address quotedIntegratorFeeRecipient,
-            address quotedSeller,
-            bytes32 quotedListingHash,
-            address recoveredSigner
-        ) = feeStore.validateSignedReceiptPurchase(quote, signature, buyer);
+        NotaReceiptStore.SignedReceiptPurchaseValidation memory validation =
+            feeStore.validateSignedReceiptPurchase(quote, signature, buyer, quoteSigner);
 
-        assertEq(grossAmount, quotedAmount);
-        assertEq(protocolFee, protocolFeeAmount);
-        assertEq(integratorFee, integratorFeeAmount);
-        assertEq(sellerNet, quotedAmount - protocolFeeAmount - integratorFeeAmount);
-        assertEq(protocolFeeRecipient, feeRecipient);
-        assertEq(quotedIntegratorFeeRecipient, integrator);
-        assertEq(quotedSeller, seller);
-        assertEq(quotedListingHash, listingHash);
-        assertEq(recoveredSigner, quoteSigner);
+        assertEq(validation.grossAmount, quotedAmount);
+        assertEq(validation.protocolFee, protocolFeeAmount);
+        assertEq(validation.integratorFee, integratorFeeAmount);
+        assertEq(validation.sellerNet, quotedAmount - protocolFeeAmount - integratorFeeAmount);
+        assertEq(validation.protocolFeeRecipient, feeRecipient);
+        assertEq(validation.integratorFeeRecipient, integrator);
+        assertEq(validation.seller, seller);
+        assertEq(validation.listingHash, listingHash);
+        assertEq(validation.verifiedSigner, quoteSigner);
     }
 
     function test_ValidateSignedReceiptPurchase_InvalidSignatureReverts() public {
@@ -2545,7 +2768,7 @@ contract NotaReceiptStoreTest is Test {
         bytes memory signature = _signSignedReceiptQuote(store, ATTACKER_PK, quote);
 
         vm.expectRevert(NotaReceiptStore.InvalidQuoteSigner.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_WrongExpectedBuyerReverts() public {
@@ -2555,7 +2778,7 @@ contract NotaReceiptStoreTest is Test {
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
         vm.expectRevert(NotaReceiptStore.QuoteBuyerMismatch.selector);
-        store.validateSignedReceiptPurchase(quote, signature, attacker);
+        store.validateSignedReceiptPurchase(quote, signature, attacker, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_ZeroBuyerPassesForAnyExpectedBuyer() public {
@@ -2567,12 +2790,12 @@ contract NotaReceiptStoreTest is Test {
         );
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
-        (uint256 grossAmount,,,,,, address quotedSeller,, address recoveredSigner) =
-            store.validateSignedReceiptPurchase(quote, signature, attacker);
+        NotaReceiptStore.SignedReceiptPurchaseValidation memory validation =
+            store.validateSignedReceiptPurchase(quote, signature, attacker, address(0));
 
-        assertEq(grossAmount, quotedAmount);
-        assertEq(quotedSeller, seller);
-        assertEq(recoveredSigner, seller);
+        assertEq(validation.grossAmount, quotedAmount);
+        assertEq(validation.seller, seller);
+        assertEq(validation.verifiedSigner, seller);
     }
 
     function test_ValidateSignedReceiptPurchase_ExpiredQuoteReverts() public {
@@ -2584,7 +2807,7 @@ contract NotaReceiptStoreTest is Test {
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
         vm.expectRevert(NotaReceiptStore.QuoteExpired.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_ExpiresAtEqualToIssuedAtReverts() public {
@@ -2596,7 +2819,7 @@ contract NotaReceiptStoreTest is Test {
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
         vm.expectRevert(NotaReceiptStore.InvalidParams.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_QuoteExpiryTooLongReverts() public {
@@ -2607,7 +2830,7 @@ contract NotaReceiptStoreTest is Test {
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
         vm.expectRevert(NotaReceiptStore.QuoteExpiryTooLong.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_InactiveListingReverts() public {
@@ -2620,7 +2843,7 @@ contract NotaReceiptStoreTest is Test {
         store.setListingActive(listingId, false);
 
         vm.expectRevert(NotaReceiptStore.ListingInactive.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_ZeroPurchaseRefReverts() public {
@@ -2630,7 +2853,7 @@ contract NotaReceiptStoreTest is Test {
         bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
 
         vm.expectRevert(NotaReceiptStore.InvalidPurchaseRef.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_RefConsumedByAnotherConsumerReverts() public {
@@ -2647,7 +2870,7 @@ contract NotaReceiptStoreTest is Test {
         assertEq(registry.consumedBy(purchaseRef), externalConsumer);
 
         vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
     }
 
     function test_ValidateSignedReceiptPurchase_UsedPurchaseRefReverts() public {
@@ -2659,7 +2882,7 @@ contract NotaReceiptStoreTest is Test {
         uint256 receiptId = _purchaseSignedReceiptAs(store, buyer, quote, signature);
 
         vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
-        store.validateSignedReceiptPurchase(quote, signature, buyer);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
         assertEq(receiptId, 1);
         _assertRegistryConsumption(purchaseRef, address(store));
     }
@@ -2934,7 +3157,7 @@ contract NotaReceiptStoreTest is Test {
         Vm.Log[] memory entries = vm.getRecordedLogs();
 
         bytes32 receiptPurchasedTopic0 =
-            keccak256("ReceiptPurchasedV2(uint256,address,address,uint256,bytes32,uint256,bytes32)");
+            keccak256("ReceiptPurchasedV2(uint256,address,address,uint256,bytes32,uint256,bytes32,bytes32)");
         bool found;
 
         for (uint256 i; i < entries.length; ++i) {

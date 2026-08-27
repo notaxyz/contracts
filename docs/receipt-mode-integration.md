@@ -36,7 +36,7 @@ client-side cache vs. chain mismatch fails fast at the allowance check.
 Do not use this path for seller-issued private links, Telegram checkout links, order-specific
 checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
 
-### Use `purchaseSignedReceipt(quote, sellerSignature)` when:
+### Use `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)` when:
 
 - the flow is a real checkout or payment link
 - the buyer may optionally be pre-bound (set `buyer` to bind, or to the zero address to leave unbound)
@@ -70,7 +70,7 @@ prevents the quote from being redeemed more than once.
 payload. A signed quote is valid only between `issuedAt` and `expiresAt`, and
 `expiresAt - issuedAt` must not exceed `MAX_QUOTE_TTL`.
 
-Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer)` when you want the same
+Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer, claimedSigner)` when you want the same
 validation path as `purchaseSignedReceipt` without moving funds or creating a receipt.
 
 Use `previewSignedReceiptPurchase(quote)` only for fee math. It does not verify signature, buyer
@@ -256,3 +256,49 @@ Official v1 deployments are intended for 6-decimal settlement tokens such as USD
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless a future version adjusts the constants
 
 For Arbitrum mainnet, use the canonical or native USDC deployment intended by the project.
+
+## Signing a Quote
+
+`claimedSigner` names who produced the signature: `address(0)` for the listing seller, or the
+delegate's address when a listing-authorized quote signer signed. The contract requires both that
+the named address is authorized and that the signature verifies against it, so naming an address
+grants nothing on its own.
+
+Quote verification uses `SignatureChecker`, so a seller on a smart wallet (Coinbase Smart Wallet,
+Safe) can sign quotes. Pass `address(0)` exactly as an EOA seller would — the wallet address is the
+listing seller either way.
+
+### Smart-wallet quotes expire on key rotation
+
+An ERC-1271 signature is valid only while the wallet still vouches for it. **If a seller rotates
+the owners of their smart wallet, every quote that wallet previously signed becomes invalid
+immediately, including unexpired ones.** No event marks this; the next purchase attempt simply
+reverts with `InvalidQuoteSigner`.
+
+If you generate payment links:
+
+- treat `expiresAt` as an upper bound on validity, not a guarantee of it
+- re-run `validateSignedReceiptPurchase` right before prompting the buyer to pay, not once at link
+  creation time
+- re-issue outstanding links after a seller rotates wallet keys
+
+EOA sellers are unaffected — ECDSA signatures do not expire this way.
+
+## Agent Attribution (`agentId`)
+
+`agentId` is an opaque `bytes32` in the signed quote, emitted in `ReceiptPurchasedV2`. Use it to
+carry an ERC-8004-style agent identifier — a registry-scoped ID or a hash of one. Zero means
+unspecified; the direct `purchaseReceipt` path always emits zero.
+
+The seller sets it, inside the signed payload. That is deliberate: the buyer is the agent, and a
+self-declared identity proves nothing. The seller attests to it the same way they attest to
+`metadataHash`.
+
+**It is seller-attested, not chain-verified.** The contract does not validate `agentId` or resolve
+it against any registry — hard-coding a registry address would couple the protocol to one ID
+scheme. A receipt carrying an `agentId` means *the seller claims* this sale was to that agent, and
+is worth exactly as much as that seller's own verification of the claim. Resolve and judge it
+off-chain accordingly.
+
+It is not an indexed event topic. Filter on `seller`, `buyer`, or `purchaseRef` and read `agentId`
+from the log data, or index it in a subgraph for agent-level rollups.
