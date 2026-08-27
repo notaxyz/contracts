@@ -22,27 +22,22 @@ v1 is intentionally limited to Receipt Mode.
 
 - v1 does not act as a marketplace, escrow system, refund system, or delivery-verification protocol
 
-## Privacy Scope
+## What Goes On-Chain
 
-The current Receipt Mode contracts do not implement zero-knowledge proofs.
-
-The contracts focus on the first production primitive of Nota:
+The contracts implement one primitive:
 
 ```text
 payment → settlement → on-chain receipt
 ```
 
-Future modules may introduce privacy-preserving verification, selective disclosure, or encrypted
-delivery. None of that is present today.
+Everything else is deliberately kept off-chain, which is also what bounds how much a public receipt
+discloses:
 
-In the current contracts, privacy is limited to design choices such as:
-
-- storing metadata commitments instead of full metadata
-- using opaque purchase references
-- keeping fulfillment and delivery logic off-chain
-- emitting indexable payment and receipt events
-
-This README describes the current smart contract system only. It should not be read as a claim that the current contracts use ZK proofs.
+- listing metadata is committed as a hash, never stored in full
+- purchase references are opaque `bytes32` hashes; the raw reference and its secret nonce stay
+  off-chain
+- fulfillment, delivery, refunds, disputes, and support live in seller systems
+- receipts are events rather than storage, and carry commitments rather than contents
 
 ## Product Model
 
@@ -112,8 +107,6 @@ For production checkout/payment-link flows, prefer signed quotes.
 - Use this for Telegram bot flows, seller-issued order links, private links, custom pricing, and partner or integrator checkouts.
 
 ### Fixed-price receipt flow
-
-Buyer Proof Mode fits inside the fixed-price path.
 
 1. Create a fixed-price listing with `createListing(listingHash, unitPrice, ListingMode.PublicFixedPrice)`. The `unitPrice` is immutable for the lifetime of the listing; to change a product's price, create a new listing.
 2. Optionally pause or resume the listing with `setListingActive(listingId, active)`.
@@ -369,7 +362,7 @@ hash:
 
 ```ts
 // rawPurchaseRef is the business identifier; purchaseRefNonce is the secret entropy.
-const rawPurchaseRef = `rev_topup_${crypto.randomUUID().replaceAll("-", "")}`;
+const rawPurchaseRef = `nota_topup_${crypto.randomUUID().replaceAll("-", "")}`;
 const purchaseRefNonce = ethers.hexlify(crypto.getRandomValues(new Uint8Array(32))); // secret, 32 bytes
 const purchaseRef = await receiptStore.hashPurchaseRef(seller, listingId, rawPurchaseRef, purchaseRefNonce);
 ```
@@ -384,7 +377,7 @@ purchaseRef = keccak256(abi.encode(
 
 - `rawPurchaseRef` — the business identifier. Recommended canonical form `<namespace>_<context>_<random>`
   (issuing brand slug, lowercased flow/service id, opaque suffix), e.g.
-  `rev_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`. With a nonce present, a plain human-readable ref such
+  `nota_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`. With a nonce present, a plain human-readable ref such
   as `invoice-123` is also acceptable.
 - `purchaseRefNonce` — a **secret, high-entropy 32-byte salt** generated with a CSPRNG. This is where
   the cryptographic strength comes from: even a guessable `rawPurchaseRef` cannot be brute-forced into

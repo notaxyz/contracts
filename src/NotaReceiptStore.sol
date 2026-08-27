@@ -847,7 +847,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Return the canonical on-chain `purchaseRef` hash for an off-chain
     ///         `(rawPurchaseRef, purchaseRefNonce)` bundle.
     /// @dev `rawPurchaseRef` is the human/business identifier (e.g. `invoice-123` or the canonical
-    ///      `<namespace>_<context>_<random>` form like `rev_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`),
+    ///      `<namespace>_<context>_<random>` form like `nota_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`),
     ///      while `purchaseRefNonce` is a secret high-entropy random `bytes32` salt. The cryptographic
     ///      strength of the commitment comes from `purchaseRefNonce`: even a guessable
     ///      `rawPurchaseRef` cannot be brute-forced into the on-chain `purchaseRef` without knowing

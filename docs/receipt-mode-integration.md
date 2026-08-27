@@ -201,7 +201,7 @@ Do not use:
 Prefer the canonical `<namespace>_<context>_<random>` format — an issuing brand/merchant slug, a
 lowercased flow or service id, and an opaque high-entropy (>=128-bit) random suffix:
 
-- `rev_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`
+- `nota_topup_4f8c1d9a2b7e6035a1c4d8e9f0b2a6c3`
 - `GG_credit_topup_9b1c0a7f5e2d43687a0f2c9b1e6d4a08`
 
 The `namespace` and `context` are operational labels only; the high-entropy `random` suffix is what
