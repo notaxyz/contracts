@@ -19,7 +19,7 @@ contract Deploy is Script {
     ///      boundary rather than left to the operator's env file. If a fee is ever right it
     ///      belongs on the reconciliation API, not on settlement.
     uint256 internal constant BASE_MAINNET_EXPECTED_PROTOCOL_FEE_BPS = 0;
-    /// @dev v1 assumes a 6-decimal settlement token such as USDC.
+    /// @dev Receipt settlement assumes a 6-decimal token such as USDC.
     uint8 internal constant EXPECTED_SETTLEMENT_TOKEN_DECIMALS = 6;
     /// @dev Arbitrum One mainnet chain id.
     uint256 internal constant ARBITRUM_ONE_CHAIN_ID = 42161;

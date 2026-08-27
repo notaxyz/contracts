@@ -28,7 +28,7 @@ This path is simple and public. It is not buyer-bound before submission. Anyone 
 valid unconsumed `purchaseRef` first and pays first receives the receipt.
 
 `amount` is the buyer's exact-price assertion. The contract reverts with `PriceMismatch` if
-`listing.unitPrice != amount`. Listing prices are immutable in v1 (there is no `setListingPrice`)
+`listing.unitPrice != amount`. Listing prices are immutable in the contract (there is no `setListingPrice`)
 — to change a product's price, the seller creates a new listing. Frontends should set the ERC-20
 allowance to exactly `amount`, not `type(uint256).max`, both as defense-in-depth and so any
 client-side cache vs. chain mismatch fails fast at the allowance check.
@@ -107,7 +107,7 @@ Use JSON Canonicalization Scheme (JCS)-style serialization (stable key order, no
 hashing. **Never** hash raw `JSON.stringify()` output unless the runtime guarantees deterministic key
 ordering and value normalization.
 
-Recommended v1 shape (`schema: "nota.checkout.metadata.v1"`):
+Recommended metadata schema (`schema: "nota.checkout.metadata.v1"`):
 
 ```json
 {
@@ -115,7 +115,7 @@ Recommended v1 shape (`schema: "nota.checkout.metadata.v1"`):
   "protocol": {
     "name": "Nota",
     "version": "1",
-    "chainId": 421614,
+    "chainId": 8453,
     "receiptStore": "0x...",
     "settlementToken": "0x..."
   },
@@ -249,14 +249,15 @@ The seller wallet itself remains a valid direct signer without being registered 
 
 ## Settlement Token Assumption
 
-Official v1 deployments are intended for 6-decimal settlement tokens such as USDC.
+Official deployments are intended for 6-decimal settlement tokens such as USDC.
 
 - `MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC
 - there is no protocol-level maximum purchase amount in this contract
 - large purchases are controlled by seller quote policy, frontend/backend limits, token allowance and balance, and operational risk controls
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless a future version adjusts the constants
 
-For Arbitrum mainnet, use the canonical or native USDC deployment intended by the project.
+For Base mainnet, use Circle's native USDC. The historical Arbitrum One v1 deployment also used
+Circle's native USDC, but Base is the canonical v2 network.
 
 ## Signing a Quote
 

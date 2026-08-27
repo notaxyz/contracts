@@ -1,26 +1,33 @@
-# Nota v1
+# Nota
 
-Nota v1 is a minimal on-chain receipt and settlement layer for digital sellers.
+Verifiable on-chain receipts for AI agent payments.
 
-Buyer pays.  
-Seller gets paid.  
-Your backend receives a verifiable on-chain purchase receipt.
+A seller signs a quote as EIP-712 typed data. The buyer pays USDC. A smart
+contract emits an immutable receipt binding the payment to the itemized goods.
+No escrow, no protocol fee on Base.
+
+*Formerly zkReveal.*
+
+| Network | Contract | Status |
+| --- | --- | --- |
+| Base | `TBD` | v2, canonical, deploy pending |
+| Arbitrum One | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | v1, June 2026 |
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
-v1 is intentionally limited to Receipt Mode.
+Nota is intentionally limited to Receipt Mode.
 
-- v1 records payment, settlement, and receipt creation on-chain
+- records payment, settlement, and receipt creation on-chain
 
-- v1 settles funds immediately
+- settles funds immediately
 
-- v1 supports fixed-price listings and seller-authorized signed quotes
+- supports fixed-price listings and seller-authorized signed quotes
 
-- v1 supports protocol fees and optional signed integrator fees
+- Base v2 has no protocol fee; signed quotes may still include optional integrator fees
 
-- v1 leaves fulfillment, delivery, refunds, disputes, and customer support to off-chain seller systems
+- leaves fulfillment, delivery, refunds, disputes, and customer support to off-chain seller systems
 
-- v1 does not act as a marketplace, escrow system, refund system, or delivery-verification protocol
+- does not act as a marketplace, escrow system, refund system, or delivery-verification protocol
 
 ## What Goes On-Chain
 
@@ -41,7 +48,7 @@ discloses:
 
 ## Product Model
 
-Nota v1 receipt mode has two immutable on-chain components:
+Nota receipt mode has two immutable on-chain components:
 
 - `PurchaseRefRegistry` is the canonical replay-protection primitive. It consumes each
   protocol-scoped `purchaseRef` once and stores which authorized settlement contract or module
@@ -80,7 +87,7 @@ purchased, rather than leaving that to depend on which function a buyer happens 
 The protocol only enforces *whether* a signed quote is required. Who issues that quote —
 seller wallet, backend, bot, or dashboard — is an application-layer concern.
 
-The mode cannot be changed after creation; v1 has no `setListingMode`. To move a product
+The mode cannot be changed after creation; the contract has no `setListingMode`. To move a product
 to a different mode, deactivate the listing with `setListingActive(listingId, false)` and
 create a new one.
 
@@ -123,12 +130,12 @@ Seller Payment Link Mode fits inside the signed quote path and is the recommende
 
 1. Seller backend creates an order, generates a short off-chain `rawPurchaseRef`, and derives the protocol-scoped `purchaseRef` hash.
 2. Seller optionally authorizes a backend or service key for the listing with `setListingQuoteSigner(listingId, signer, true)`.
-3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, `agentId`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the v1 `settlementToken`, and the immutable `purchaseRefRegistry`.
+3. The seller wallet or an authorized quote signer signs a `SignedReceiptQuote` over `listingId`, `buyer`, `purchaseRef`, `amount`, `metadataHash`, `agentId`, optional `integratorFeeRecipient`, optional `integratorFeeAmount`, seller-declared `issuedAt`, and `expiresAt`; the EIP-712 digest also binds the listing `seller`, the immutable `settlementToken`, and the immutable `purchaseRefRegistry`.
 4. Buyer approves the settlement token and calls `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)`. Pass `address(0)` for `claimedSigner` when the listing seller signed; pass the delegate's address when an authorized quote signer signed.
 5. The contract checks that `claimedSigner` is the seller or authorized for `quote.listingId`, then verifies the EIP-712 signature against it. Both checks must pass.
 6. `ReceiptPurchasedV2` confirms payment, and the seller fulfills the order off-chain.
 
-Signed quotes are the v1 mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery. `issuedAt` is the seller-declared quote issuance timestamp and part of the signed EIP-712 payload. A signed quote is valid only between `issuedAt` and `expiresAt`, and `expiresAt - issuedAt` must not exceed `MAX_QUOTE_TTL`.
+Signed quotes are the production mechanism for dynamic pricing. They do not introduce escrow, delayed settlement, or on-chain price discovery. `issuedAt` is the seller-declared quote issuance timestamp and part of the signed EIP-712 payload. A signed quote is valid only between `issuedAt` and `expiresAt`, and `expiresAt - issuedAt` must not exceed `MAX_QUOTE_TTL`.
 `metadataHash` must be non-zero and should commit to the readable off-chain payment-link or checkout metadata the seller intends to authorize.
 
 Use `validateSignedReceiptPurchase(quote, sellerSignature, expectedBuyer, claimedSigner)` when a frontend, bot, or backend wants the same validation path as `purchaseSignedReceipt` without moving funds or creating a receipt. It returns a `SignedReceiptPurchaseValidation` struct.
@@ -253,7 +260,7 @@ Use JSON Canonicalization Scheme (JCS)-style serialization (stable key order, no
 hashing. **Never** hash raw `JSON.stringify()` output unless the runtime guarantees deterministic key
 ordering and value normalization.
 
-Recommended v1 shape (`schema: "nota.checkout.metadata.v1"`):
+Recommended metadata schema (`schema: "nota.checkout.metadata.v1"`):
 
 ```json
 {
@@ -261,7 +268,7 @@ Recommended v1 shape (`schema: "nota.checkout.metadata.v1"`):
   "protocol": {
     "name": "Nota",
     "version": "1",
-    "chainId": 421614,
+    "chainId": 8453,
     "receiptStore": "0x...",
     "settlementToken": "0x..."
   },
@@ -501,7 +508,7 @@ and a self-declared identity is worthless.
 
 ## Fee Model
 
-The v1 fee model is immutable at deployment:
+The fee model is immutable at deployment:
 
 - `settlementToken`
 - `feeRecipient`
@@ -515,16 +522,17 @@ Constraints:
 - `feeRecipient` must be non-zero when `protocolFeeBps > 0`
 - `integratorFeeRecipient` must be the zero address when `integratorFeeAmount = 0`
 - `integratorFeeRecipient` must be non-zero when `integratorFeeAmount > 0`
-- official v1 deployments are intended for a 6-decimal settlement token such as USDC
+- official deployments are intended for a 6-decimal settlement token such as USDC
 - `MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC
 - there is no protocol-level maximum purchase amount in this contract
 - large purchases are controlled by seller quote policy, frontend/backend limits, token allowance and balance, and operational risk controls
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless constants are adjusted in a future version
-- for Arbitrum mainnet, use the canonical or native USDC deployment intended by the project
+- Base mainnet uses Circle's native USDC and an immutable zero protocol fee
+- the historical Arbitrum One v1 deployment uses Circle's native USDC and a 50 bps protocol fee
 - `settlementToken` should be a standard ERC-20 such as USDC
 - fee-on-transfer and rebasing tokens are not supported
 
-There is no dynamic fee mutation in v1.
+There is no dynamic fee mutation.
 
 ## Safety Controls
 
@@ -536,11 +544,12 @@ The owner can independently pause:
 - purchases
 - quote signer updates
 
-v1 also enforces conservative protocol limits:
+Nota also enforces conservative protocol limits:
 
 - min purchase: 0.0001 USDC (`1e2`) assuming a 6-decimal settlement token
 - max quote TTL: 24 hours
 - max listings per seller: 500 active at once
+- max quote signers per seller: 3
 
 `MAX_LISTINGS_PER_SELLER` is a concurrency cap, not a lifetime one. Deactivating a listing with
 `setListingActive(listingId, false)` releases its slot, and reactivating reclaims one and re-checks
@@ -556,7 +565,6 @@ renouncing mid-pause strands the contract in that state permanently, with no rec
 buyer could purchase, no seller could list, or no seller could rotate a compromised quote signer.
 Clear the pauses first, then renounce. Renouncing while unpaused is permitted and, as always,
 irreversible.
-- max quote signers per seller: 3
 
 Integration guide:
 
@@ -615,10 +623,10 @@ forge test --offline --suppress-successful-traces
 
 ## Deployment
 
-The v1 deploy script deploys `PurchaseRefRegistry` first and then deploys `NotaReceiptStore`
+The deploy script deploys `PurchaseRefRegistry` first and then deploys `NotaReceiptStore`
 with that registry address wired into the constructor.
 
-Official v1 deployments are intended for a 6-decimal settlement token such as USDC.
+Official deployments are intended for a 6-decimal settlement token such as USDC.
 `MIN_PURCHASE_AMOUNT = 1e2` assumes 6 decimals and means 0.0001 USDC. The floor is deliberately
 low so x402 agent payments, which are typically fractions of a cent, can settle.
 
@@ -629,20 +637,22 @@ unit — so on a fee-charging deployment the smallest purchases pay no protocol 
 There is no protocol-level maximum purchase amount in this contract. Large purchases are
 controlled by seller quote policy, frontend/backend limits, token allowance and balance, and
 operational risk controls.
-The deploy script enforces `IERC20Metadata(SETTLEMENT_TOKEN).decimals() == 6`. On Arbitrum
-One mainnet (`chainid 42161`) the script additionally pins `SETTLEMENT_TOKEN` to Circle's
-canonical native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` and rejects USDC.e (bridged).
+The deploy script enforces `IERC20Metadata(SETTLEMENT_TOKEN).decimals() == 6`.
+On Base mainnet (`chainid 8453`) it additionally pins `SETTLEMENT_TOKEN` to Circle's
+native USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, requires
+`PROTOCOL_FEE_BPS=0`, and requires `FEE_RECIPIENT` to be unset or the zero address.
+Bridged USDbC is rejected.
 
 Required envs:
 
 - `RPC_URL`
 - `PRIVATE_KEY`
 - `SETTLEMENT_TOKEN`
-- `FEE_RECIPIENT`
-- `PROTOCOL_FEE_BPS` — must equal `EXPECTED_PROTOCOL_FEE_BPS` in `Deploy.s.sol` (currently `50`)
+- `PROTOCOL_FEE_BPS` — must equal the script's expected fee for the current chain (`0` on Base)
 
 Optional envs:
 
+- `FEE_RECIPIENT` — leave unset on Base. Required only when deploying a fee-charging chain.
 - `PROTOCOL_OWNER` — override the default owner. If unset (or equal to the deployer), the
   deployer is set as the immediate owner of both contracts in their constructors and the
   script skips `transferOwnership`, so there is no `Ownable2Step` pending-owner window. If
@@ -650,8 +660,9 @@ Optional envs:
   target must call `acceptOwnership()` in a separate transaction before it actually owns
   the registry.
 
-`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`. The fee recipient
-is immutable post-deploy — verify the address can receive USDC before broadcasting.
+`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`. On Base it must stay
+unset or zero so the deployed contract has no fee destination at all. On fee-charging chains, the
+fee recipient is immutable post-deploy — verify the address can receive USDC before broadcasting.
 
 The deploy output logs both:
 
@@ -661,30 +672,22 @@ The deploy output logs both:
 If a future Nota settlement contract must share replay protection with an existing deployment,
 it should be deployed against the same `PurchaseRefRegistry` address.
 
-Typical Arbitrum One mainnet flow (solo deployer, deployer == protocol owner):
+Canonical Base mainnet flow (solo deployer, deployer == protocol owner):
 
 ```bash
-export RPC_URL="https://arb1.arbitrum.io/rpc"
+export RPC_URL="https://mainnet.base.org"
 export PRIVATE_KEY="0xYOUR_DEPLOYER_KEY"
-export SETTLEMENT_TOKEN="0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # Arbitrum One native USDC
-export FEE_RECIPIENT="0xYOUR_FEE_RECIPIENT"                            # separate address, immutable
-export PROTOCOL_FEE_BPS="50"
+export SETTLEMENT_TOKEN="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"  # Base native USDC
+unset FEE_RECIPIENT
+export PROTOCOL_FEE_BPS="0"
 # PROTOCOL_OWNER left unset → defaults to deployer → no pending-owner window
 
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast --verify
 ```
 
-Arbitrum Sepolia flow (testnet, any 6-decimal USDC):
-
-```bash
-export RPC_URL="https://your-arbitrum-sepolia-rpc"
-export PRIVATE_KEY="0xYOUR_DEPLOYER_KEY"
-export SETTLEMENT_TOKEN="0xYOUR_TEST_USDC_ON_SEPOLIA"
-export FEE_RECIPIENT="0xYOUR_FEE_RECIPIENT"
-export PROTOCOL_FEE_BPS="50"
-
-forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast
-```
+The Arbitrum One deployment in `deployments/arbitrum-one.json` is the June 2026 v1 contract
+named `RevealReceiptStore` in verified source and manifests. It remains live for historical
+integrations, but Base is the canonical v2 deployment path.
 
 After deployment, record:
 
@@ -703,6 +706,6 @@ After deployment, record:
 
 ## Scope
 
-Nota v1 is intentionally focused on receipt-mode settlement and off-chain fulfillment.
+Nota is intentionally focused on receipt-mode settlement and off-chain fulfillment.
 
 Future modules should be documented in their own specifications and repositories when they are designed or implemented.
