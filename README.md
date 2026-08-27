@@ -440,7 +440,7 @@ If seller systems also need product context, they should resolve it off-chain fr
 The contract also stores:
 
 - `PurchaseRefRegistry.consumptions[purchaseRef]` as the canonical replay-protection record
-- `listingCountBySeller[seller]` only to enforce `MAX_LISTINGS_PER_SELLER`
+- `listingCountBySeller[seller]`, the number of listings a seller currently has active, only to enforce `MAX_LISTINGS_PER_SELLER`
 
 Receipts themselves are not stored on-chain. Writing the six-field receipt struct plus a
 seller-scoped lookup mapping cost roughly 155k gas per purchase and nothing on-chain read it:
@@ -546,7 +546,22 @@ v1 also enforces conservative protocol limits:
 
 - min purchase: 0.0001 USDC (`1e2`) assuming a 6-decimal settlement token
 - max quote TTL: 24 hours
-- max listings per seller: 500
+- max listings per seller: 500 active at once
+
+`MAX_LISTINGS_PER_SELLER` is a concurrency cap, not a lifetime one. Deactivating a listing with
+`setListingActive(listingId, false)` releases its slot, and reactivating reclaims one and re-checks
+the cap. A seller who changes prices by superseding listings — the only way to change a price,
+since `unitPrice` is immutable — does not permanently spend their budget. The trade is that
+reactivating an old listing can fail if the seller has since filled the cap.
+
+### Ownership
+
+`renounceOwnership()` reverts while any pause flag is set — `purchasesPaused`,
+`listingCreationPaused`, or `quoteSignerUpdatesPaused`. Only the owner can clear a pause, so
+renouncing mid-pause strands the contract in that state permanently, with no recovery path: no
+buyer could purchase, no seller could list, or no seller could rotate a compromised quote signer.
+Clear the pauses first, then renounce. Renouncing while unpaused is permitted and, as always,
+irreversible.
 - max quote signers per seller: 3
 
 Integration guide:

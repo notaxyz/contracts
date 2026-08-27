@@ -37,9 +37,9 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     string public constant EIP712_VERSION = "2";
     /// @dev 50 bps = 0.5%.
     uint16 public constant MAX_PROTOCOL_FEE_BPS = 50;
-    /// @dev 450 bps = 4.5%. Combined with the protocol fee cap, v1 fees cannot exceed 5%.
+    /// @dev 450 bps = 4.5%. Combined with the protocol fee cap, fees cannot exceed 5%.
     uint16 public constant MAX_INTEGRATOR_FEE_BPS = 450;
-    /// @dev v1 assumes a 6-decimal settlement token such as USDC.
+    /// @dev This contract assumes a 6-decimal settlement token such as USDC.
     ///      `1e2` means 0.0001 USDC when the settlement token uses 6 decimals. The floor is set
     ///      this low deliberately: x402 agent payments are typically fractions of a cent, and a
     ///      1 USDC floor excluded them entirely.
@@ -67,8 +67,8 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // Immutables
     // -------------------------------------------------------------------------
 
-    /// @notice Settlement token used for all v1 purchases.
-    /// @dev Official v1 deployments are intended for 6-decimal tokens such as USDC.
+    /// @notice Settlement token used for all purchases.
+    /// @dev Official deployments are intended for 6-decimal tokens such as USDC.
     ///      The constructor does not inspect token decimals.
     IERC20 public immutable SETTLEMENT_TOKEN;
     /// @notice Canonical protocol-level replay protection registry shared across settlement stores.
@@ -80,7 +80,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // Enums
     // -------------------------------------------------------------------------
 
-    /// @notice Receipt issuance mode a listing is locked into at creation. Immutable in v1.
+    /// @notice Receipt issuance mode a listing is locked into at creation. Immutable once set.
     /// @dev `PublicFixedPrice` means public direct checkout at the listing `unitPrice`: anyone may
     ///      buy directly via `purchaseReceipt`. Seller-authorized EIP-712 quotes via
     ///      `purchaseSignedReceipt` are ALSO allowed for these listings, which is what enables
@@ -110,7 +110,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
 
     /// @notice Seller-authorized EIP-712 quote for a receipt purchase, with optional buyer binding.
     /// @dev The signed digest binds the listing seller, `listingId`, `buyer`, `purchaseRef`,
-    ///      `amount`, `metadataHash`, the v1 `SETTLEMENT_TOKEN`, the immutable
+    ///      `amount`, `metadataHash`, the immutable `SETTLEMENT_TOKEN`, the
     ///      `PURCHASE_REF_REGISTRY`, optional integrator fee fields, seller-declared `issuedAt`,
     ///      `expiresAt`, `block.chainid`, and `address(this)`. `buyer` is optional: when it is a
     ///      non-zero address it must match `msg.sender` during `purchaseSignedReceipt`, so another
@@ -118,7 +118,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      and any wallet may submit and pay, with the payer recorded as the receipt buyer.
     ///      Single-use `purchaseRef` still prevents the quote from being redeemed more than once. The
     ///      quote may be signed by the seller directly or by a signer authorized for this listing with
-    ///      `setListingQuoteSigner`. Authorization is listing-scoped in v1, so an authorized quote signer
+    ///      `setListingQuoteSigner`. Authorization is listing-scoped, so an authorized quote signer
     ///      can sign quotes only for the specific `listingId` where that signer was authorized.
     ///      A listing-authorized signer controls the full signed quote intent for that listing,
     ///      including amount, metadata, buyer binding, purchaseRef, and optional integrator fee fields.
@@ -126,12 +126,12 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      `(rawPurchaseRef, purchaseRefNonce)` entitlement bundle.
     ///      Only this hash belongs in the quote; `purchaseRefNonce` must remain off-chain and must
     ///      not be added to `SignedReceiptQuote` or settlement calldata. `metadataHash` commits to
-    ///      the seller-authorized canonical checkout metadata (the v1 payment-intent payload) as
+    ///      the seller-authorized canonical checkout metadata (the payment-intent payload) as
     ///      `keccak256` over its JCS-canonicalized JSON; it MUST be non-zero here and MUST NOT
     ///      commit to secrets or buyer PII (never `purchaseRefNonce`, unlock/delivery secrets,
     ///      private invite links, emails, phone numbers, or Telegram handles). The contract only
     ///      ever sees and stores this `bytes32` commitment; the readable metadata stays off-chain.
-    ///      See "Canonical Checkout Metadata" in the contracts README for the v1 shape and rules.
+    ///      See "Canonical Checkout Metadata" in the contracts README for the shape and rules.
     ///      `amount` is denominated in settlement token base units.
     ///      Integrator fee fields are optional, must be explicitly included in the
     ///      seller-authorized quote, and are paid from the gross `amount`; the seller receives
@@ -205,8 +205,10 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     uint256 public nextReceiptId = 1;
 
     mapping(uint256 => Listing) public listings;
-    /// @dev Enforces `MAX_LISTINGS_PER_SELLER`. Listing discovery is expected to come from
-    ///      `ListingCreated` events or indexers, not on-chain enumeration.
+    /// @dev Number of listings a seller currently has active, enforcing `MAX_LISTINGS_PER_SELLER`
+    ///      as a concurrency cap: `createListing` and reactivation increment it, deactivation
+    ///      decrements it. Listing discovery is expected to come from `ListingCreated` events or
+    ///      indexers, not on-chain enumeration.
     mapping(address seller => uint256 count) public listingCountBySeller;
     /// @dev Listing-scoped quote signer authorization.
     ///      `authorizedQuoteSigners[listingId][signer] = true` means `signer` may sign
@@ -298,6 +300,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     error AmountOutOfBounds();
     error QuoteExpiryTooLong();
     error SellerListingLimitReached();
+    error RenounceWhilePausedDisabled();
     error QuoteSignerLimitReached();
     error PriceMismatch();
 
@@ -314,8 +317,8 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // Constructor
     // -------------------------------------------------------------------------
 
-    /// @notice Deploy a v1 receipt store with a fixed settlement token and protocol fee model.
-    /// @dev Official v1 deployments are intended for 6-decimal settlement tokens such as USDC.
+    /// @notice Deploy a receipt store with a fixed settlement token and protocol fee model.
+    /// @dev Official deployments are intended for 6-decimal settlement tokens such as USDC.
     ///      The constructor validates only address and fee bounds and does not inspect token
     ///      decimals.
     constructor(
@@ -549,7 +552,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     }
 
     /// @dev `payer` provides the settlement token. `receiptBuyer` is the buyer recorded on-chain.
-    ///      In direct v1 purchases both are `msg.sender`; future adapter flows may split them.
+    ///      In direct purchases both are `msg.sender`; future adapter flows may split them.
     function _settleReceiptPurchase(ReceiptSettlement memory input) internal returns (uint256 receiptId) {
         RakeQuote memory rake = _quoteRake(input.amount, input.integratorFeeRecipient, input.integratorFeeAmount);
 
@@ -575,6 +578,21 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     // -------------------------------------------------------------------------
     // Seller Configuration Functions
     // -------------------------------------------------------------------------
+
+    /// @notice Permanently give up ownership. Disabled while any pause flag is set.
+    /// @dev Only the owner can clear a pause flag, so renouncing mid-pause strands the contract in
+    ///      that state forever with no recovery path: with `listingCreationPaused` no seller could
+    ///      ever list again, with `purchasesPaused` no buyer could ever purchase, and with
+    ///      `quoteSignerUpdatesPaused` no seller could ever rotate a compromised quote signer.
+    ///      All three are covered because all three are permanent once ownership is gone.
+    ///      Clear the pauses first, then renounce. Renouncing while unpaused is still permitted
+    ///      and still irreversible.
+    function renounceOwnership() public override onlyOwner {
+        if (purchasesPaused || listingCreationPaused || quoteSignerUpdatesPaused) {
+            revert RenounceWhilePausedDisabled();
+        }
+        super.renounceOwnership();
+    }
 
     /// @notice Authorize or revoke a signer for one seller-owned listing's signed receipt quotes.
     /// @dev When authorized, `signer` can sign `SignedReceiptQuote` values only for `listingId`.
@@ -636,8 +654,8 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Create a seller-owned listing for Receipt Mode purchases in an explicit purchase mode.
     /// @dev `listingHash` is an opaque seller-defined metadata commitment. Human-readable product
     ///      data lives off-chain, for example inside a seller-signed payment link. `mode` selects
-    ///      how the listing may be purchased and is immutable for the lifetime of the listing; v1
-    ///      intentionally has no `setListingMode`. To move a product to a different mode, deactivate
+    ///      how the listing may be purchased and is immutable for the lifetime of the listing; there
+    ///      is intentionally no `setListingMode`. To move a product to a different mode, deactivate
     ///      the listing with `setListingActive(listingId, false)` and create a new one.
     ///
     ///      For `ListingMode.PublicFixedPrice`, `unitPrice` is the immutable on-chain price
@@ -683,9 +701,33 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @notice Update the active status of a seller-owned listing.
     /// @dev Listing prices are immutable after `createListing`. To change the price for a product,
     ///      the seller must create a new listing and optionally deactivate the old one.
+    ///
+    ///      Deactivating releases the listing's slot against `MAX_LISTINGS_PER_SELLER` and
+    ///      reactivating reclaims one, re-checking the cap. The cap therefore limits how many
+    ///      listings a seller may have active at once, not how many they may ever create: a seller
+    ///      who rotates prices by superseding listings is not permanently spending their budget.
+    ///      Reactivation can fail when the seller has since filled the cap, which is the intended
+    ///      trade for that.
     function setListingActive(uint256 listingId, bool active) external listingExists(listingId) {
         _onlyListingSeller(listingId);
-        listings[listingId].active = active;
+
+        Listing storage listing = listings[listingId];
+        // A no-op must not move the counter, and must not fail against a cap it is not consuming.
+        if (listing.active == active) {
+            emit ListingStatusChanged(listingId, msg.sender, active);
+            return;
+        }
+
+        if (active) {
+            if (listingCountBySeller[msg.sender] >= MAX_LISTINGS_PER_SELLER) {
+                revert SellerListingLimitReached();
+            }
+            listingCountBySeller[msg.sender]++;
+        } else {
+            listingCountBySeller[msg.sender]--;
+        }
+
+        listing.active = active;
         emit ListingStatusChanged(listingId, msg.sender, active);
     }
 
@@ -699,8 +741,9 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      with `ListingRequiresSignedQuote` and must be bought through `purchaseSignedReceipt`.
     ///      The buyer must pass the exact listing
     ///      `unitPrice` as `amount`; the contract reverts with `PriceMismatch` if it differs in
-    ///      either direction. Together with immutable listing prices (no `setListingPrice` exists
-    ///      in v1), this means the on-chain price the buyer asserts is the price they pay. The
+    ///      either direction. Together with immutable listing prices (there is no
+    ///      `setListingPrice`), this means the on-chain price the buyer asserts is the price they
+    ///      pay. The
     ///      caller is not buyer-bound before submission, and `msg.sender` is recorded as the
     ///      buyer. Any wallet that submits a valid unconsumed `purchaseRef` first and pays first
     ///      receives the receipt. `purchaseRef` should normally be the output of
@@ -752,7 +795,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     /// @dev Valid for both listing modes: it is the required path for `ListingMode.SignedQuoteOnly`
     ///      listings and an additional supported path for `ListingMode.PublicFixedPrice` listings
     ///      (buyer-bound payment links, metadata-bound checkout, dynamic pricing, integrator fees).
-    ///      This is the recommended v1 flow for production checkout and payment-link integrations.
+    ///      This is the recommended flow for production checkout and payment-link integrations.
     ///      Seller Payment Link Mode uses a quote signed by the listing seller or a signer authorized
     ///      for the quoted listing, with `quote.purchaseRef` carrying the seller-scoped hash
     ///      derived from an off-chain `(rawPurchaseRef, purchaseRefNonce)` entitlement bundle. The
@@ -767,7 +810,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      of the signed EIP-712 payload. A signed quote is valid only between `issuedAt` and
     ///      `expiresAt`, and `quote.expiresAt - quote.issuedAt` must not exceed
     ///      `MAX_QUOTE_TTL`. If `quote.buyer` is non-zero it must match `msg.sender`; a zero
-    ///      `quote.buyer` leaves the quote unbound so any wallet may purchase it. The recovered signer must be
+    ///      `quote.buyer` leaves the quote unbound so any wallet may purchase it. The verified signer must be
     ///      the listing seller or a signer authorized specifically for `quote.listingId`. The signed quote may
     ///      also include an optional integrator fee paid from the
     ///      gross amount. `quote.metadataHash` must be non-zero and commits to the seller-authorized
@@ -931,7 +974,7 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     ///      seller-declared quote issuance timestamp and part of the signed EIP-712 payload. A
     ///      signed quote is valid only between `issuedAt` and `expiresAt`, and
     ///      `quote.expiresAt - quote.issuedAt` must not exceed `MAX_QUOTE_TTL`. It is useful for
-    ///      frontends, bots, and backends that want the final fee breakdown and recovered signer
+    ///      frontends, bots, and backends that want the final fee breakdown and verified signer
     ///      before prompting a buyer to approve or pay.
     function validateSignedReceiptPurchase(
         SignedReceiptQuote calldata quote,

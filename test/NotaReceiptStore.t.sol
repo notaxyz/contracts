@@ -1152,7 +1152,142 @@ contract NotaReceiptStoreTest is Test {
 
         assertEq(listing.unitPrice, unitPrice);
         assertFalse(listing.active);
+        // Deactivation releases the slot: the cap counts active listings, not created ones.
+        assertEq(store.listingCountBySeller(seller), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Listing cap is a concurrency cap
+    // -------------------------------------------------------------------------
+
+    function test_SetListingActive_DeactivationReleasesCapSlot() public {
+        uint256 listingId = _createListingAsSeller();
         assertEq(store.listingCountBySeller(seller), 1);
+
+        vm.prank(seller);
+        store.setListingActive(listingId, false);
+        assertEq(store.listingCountBySeller(seller), 0);
+
+        vm.prank(seller);
+        store.setListingActive(listingId, true);
+        assertEq(store.listingCountBySeller(seller), 1);
+    }
+
+    /// @dev A no-op must not move the counter in either direction.
+    function test_SetListingActive_RedundantCallDoesNotMoveCount() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(seller);
+        store.setListingActive(listingId, true);
+        assertEq(store.listingCountBySeller(seller), 1);
+
+        vm.startPrank(seller);
+        store.setListingActive(listingId, false);
+        store.setListingActive(listingId, false);
+        vm.stopPrank();
+        assertEq(store.listingCountBySeller(seller), 0);
+    }
+
+    /// @dev The point of the change: a seller who supersedes listings to change prices is not
+    ///      permanently spending their budget. Fill the cap, deactivate one, create another.
+    function test_CreateListing_DeactivatedListingFreesCapacityForANewOne() public {
+        uint256 cap = store.MAX_LISTINGS_PER_SELLER();
+        uint256 firstListingId;
+
+        vm.startPrank(seller);
+        for (uint256 i; i < cap; ++i) {
+            uint256 id = store.createListing(
+                keccak256(abi.encodePacked("cap-listing", i)), unitPrice, NotaReceiptStore.ListingMode.PublicFixedPrice
+            );
+            if (i == 0) firstListingId = id;
+        }
+
+        assertEq(store.listingCountBySeller(seller), cap);
+        vm.expectRevert(NotaReceiptStore.SellerListingLimitReached.selector);
+        store.createListing(keccak256("one-too-many"), unitPrice, NotaReceiptStore.ListingMode.PublicFixedPrice);
+
+        store.setListingActive(firstListingId, false);
+        store.createListing(keccak256("replacement"), unitPrice, NotaReceiptStore.ListingMode.PublicFixedPrice);
+        vm.stopPrank();
+
+        assertEq(store.listingCountBySeller(seller), cap);
+    }
+
+    /// @dev The trade for that: reactivating cannot exceed the cap either.
+    function test_SetListingActive_ReactivationAtCapReverts() public {
+        uint256 cap = store.MAX_LISTINGS_PER_SELLER();
+        uint256 firstListingId;
+
+        vm.startPrank(seller);
+        for (uint256 i; i < cap; ++i) {
+            uint256 id = store.createListing(
+                keccak256(abi.encodePacked("cap-listing", i)), unitPrice, NotaReceiptStore.ListingMode.PublicFixedPrice
+            );
+            if (i == 0) firstListingId = id;
+        }
+
+        store.setListingActive(firstListingId, false);
+        store.createListing(keccak256("replacement"), unitPrice, NotaReceiptStore.ListingMode.PublicFixedPrice);
+
+        vm.expectRevert(NotaReceiptStore.SellerListingLimitReached.selector);
+        store.setListingActive(firstListingId, true);
+        vm.stopPrank();
+    }
+
+    // -------------------------------------------------------------------------
+    // renounceOwnership guard
+    // -------------------------------------------------------------------------
+
+    /// @dev Renouncing mid-pause would leave nobody able to unpause, stranding the contract with
+    ///      no recovery path.
+    function test_RenounceOwnership_RevertsWhilePurchasesPaused() public {
+        store.setPurchasesPaused(true);
+
+        vm.expectRevert(NotaReceiptStore.RenounceWhilePausedDisabled.selector);
+        store.renounceOwnership();
+
+        assertEq(store.owner(), address(this));
+    }
+
+    function test_RenounceOwnership_RevertsWhileListingCreationPaused() public {
+        store.setListingCreationPaused(true);
+
+        vm.expectRevert(NotaReceiptStore.RenounceWhilePausedDisabled.selector);
+        store.renounceOwnership();
+
+        assertEq(store.owner(), address(this));
+    }
+
+    function test_RenounceOwnership_RevertsWhileQuoteSignerUpdatesPaused() public {
+        store.setQuoteSignerUpdatesPaused(true);
+
+        vm.expectRevert(NotaReceiptStore.RenounceWhilePausedDisabled.selector);
+        store.renounceOwnership();
+
+        assertEq(store.owner(), address(this));
+    }
+
+    function test_RenounceOwnership_SucceedsWhenUnpaused() public {
+        store.renounceOwnership();
+        assertEq(store.owner(), address(0));
+    }
+
+    /// @dev Unpausing restores the ability to renounce, so the guard blocks the dangerous
+    ///      ordering rather than the operation.
+    function test_RenounceOwnership_AllowedAfterUnpausing() public {
+        store.setPurchasesPaused(true);
+        vm.expectRevert(NotaReceiptStore.RenounceWhilePausedDisabled.selector);
+        store.renounceOwnership();
+
+        store.setPurchasesPaused(false);
+        store.renounceOwnership();
+        assertEq(store.owner(), address(0));
+    }
+
+    function test_RenounceOwnership_NonOwnerRevertsWithOwnableError() public {
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+        store.renounceOwnership();
     }
 
     function test_PurchasesPause_UnpauseRestoresPurchases() public {
