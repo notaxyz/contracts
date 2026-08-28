@@ -10,7 +10,7 @@ No escrow, no protocol fee on Base.
 
 | Network | Contract | Status |
 | --- | --- | --- |
-| Base | `TBD` | v2, canonical, deploy pending |
+| Base | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | v2, canonical, deployed August 2026 |
 | Arbitrum One | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | v1, June 2026 |
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
@@ -671,6 +671,11 @@ The deploy output logs both:
 
 If a future Nota settlement contract must share replay protection with an existing deployment,
 it should be deployed against the same `PurchaseRefRegistry` address.
+
+The Base mainnet deployment in `deployments/base.json` is the canonical v2 contract:
+
+- `NotaReceiptStore`: `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88`
+- `PurchaseRefRegistry`: `0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991`
 
 Canonical Base mainnet flow (solo deployer, deployer == protocol owner):
 
