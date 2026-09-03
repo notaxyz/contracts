@@ -9,7 +9,6 @@ fs_permissions = [
   { access = "read", path = "./README.md" },
   { access = "read", path = "./script/demo-listing.json" },
   { access = "read-write", path = "./script/demo-metadata.json" },
-  { access = "read", path = "./broadcast" },
 ]
 
 solc_version = "0.8.24"
