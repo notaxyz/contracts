@@ -38,6 +38,11 @@ import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
 ///     0x5333d780992fdf98c143083b765392aeaa27cb393a034235026f57f202806770 \
 ///     --rpc-url "$BASE_RPC_URL"
 ///
+/// Important: this script rewrites `script/demo-metadata.json` on every run. The committed copy
+/// corresponds to receipt #1 on Base, purchased in transaction
+/// 0x3b9656b4a67dee38ca2bd28d8841fbb67469c0ed3f9ace2977e5b753e7230978.
+/// Re-running replaces it with a new preimage whose hash no longer matches that receipt.
+///
 /// @dev Each run materializes `script/demo-metadata.json` as the exact JCS-canonical metadata
 ///      preimage for that run. After a successful broadcast, commit that file so a public reader
 ///      can reproduce the receipt's metadataHash. `script/demo-listing.json` is a separate
