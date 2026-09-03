@@ -1,0 +1,3 @@
+# Keep canonical demo JSON line endings stable between the repository and working tree.
+script/demo-listing.json text eol=lf
+script/demo-metadata.json text eol=lf

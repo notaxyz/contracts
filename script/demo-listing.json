@@ -1,0 +1,1 @@
+{"currency":"USDC","decimals":6,"description":"One structured Base mainnet eth_feeHistory query for an autonomous agent","kind":"x402:agent_request","price":"100000","schema":"nota.listing.metadata.v1","title":"Base fee history data query"}
