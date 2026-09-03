@@ -13,6 +13,143 @@ No escrow, no protocol fee on Base.
 | Base | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | v2, canonical, deployed August 2026 |
 | Arbitrum One | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | v1, June 2026 |
 
+## Package
+
+This repo is also the source of truth for the npm package `@notaxyz/contracts`.
+SDKs, merchant runtimes, web apps, and verification tooling should import ABIs and deployment
+metadata from the package instead of copying addresses or ABI fragments.
+
+```bash
+npm install @notaxyz/contracts
+```
+
+The package is ESM-only and publishes TypeScript declarations from `dist/`.
+
+### Importing ABIs
+
+```ts
+import {
+  notaReceiptStoreAbi,
+  revealReceiptStoreAbi,
+  purchaseRefRegistryAbi,
+} from "@notaxyz/contracts";
+
+import { notaReceiptStoreAbi as receiptStoreAbi } from "@notaxyz/contracts/abis";
+```
+
+Raw ABI-only JSON imports are also available:
+
+```ts
+import notaReceiptStoreAbi from "@notaxyz/contracts/abis/NotaReceiptStore.json" with { type: "json" };
+```
+
+Use `notaReceiptStoreAbi` for current v2 `NotaReceiptStore` deployments. Use
+`revealReceiptStoreAbi` for the legacy v1 deployments whose manifests still contain the
+`revealReceiptStore` key.
+
+### Importing Deployments
+
+```ts
+import {
+  deployments,
+  getDeployment,
+  getReceiptStoreAddress,
+  hasDeployment,
+} from "@notaxyz/contracts";
+
+const deployment = getDeployment(8453);
+const receiptStore = getReceiptStoreAddress(deployment);
+
+console.log(receiptStore);
+console.log(deployments[8453].contracts.purchaseRefRegistry);
+console.log(hasDeployment(8453)); // true
+```
+
+Raw deployment JSON imports expose the deployment script output exactly as recorded in this repo:
+
+```ts
+import baseDeployment from "@notaxyz/contracts/deployments/base.json" with { type: "json" };
+```
+
+The typed `deployments` export is generated from those raw manifests into a package-facing shape:
+
+```json
+{
+  "chainId": 8453,
+  "name": "base",
+  "network": "base",
+  "environment": "mainnet",
+  "contracts": {
+    "purchaseRefRegistry": "0x...",
+    "notaReceiptStore": "0x..."
+  },
+  "tokens": {
+    "usdc": "0x..."
+  },
+  "startBlock": 50536305,
+  "deployedAt": "2026-08-27T20:19:17.000Z",
+  "version": "0.1.0"
+}
+```
+
+Older deployments keep the `revealReceiptStore` key because that is the literal verified contract
+name at those addresses. Current Nota deployments should use `notaReceiptStore`. Use
+`getReceiptStoreAddress()` when application code only needs the active receipt-store address.
+
+### Package Chains
+
+The package exports `notaSupportedChainIds` for chains Nota targets:
+
+| Chain | Chain ID | Status |
+| --- | ---: | --- |
+| Base | `8453` | canonical v2 deployment |
+| Arbitrum One | `42161` | v1 deployment |
+| Arbitrum Sepolia | `421614` | v1 testnet deployment |
+| Robinhood Testnet | `46630` | v1 testnet deployment |
+
+`getDeployment(chainId)` only returns chains with a deployment JSON file. Base is available through
+`getDeployment(8453)` and returns true from `hasDeployment(8453)`.
+
+### Package Build
+
+```bash
+npm run build
+npm run smoke:package
+npm pack --dry-run
+```
+
+`npm run build` runs Foundry build, extracts ABI-only JSON files from `out/`, validates raw
+deployment manifests, generates typed deployment exports, and compiles TypeScript declarations.
+
+ABI generation reads:
+
+- `out/NotaReceiptStore.sol/NotaReceiptStore.json`
+- `out/PurchaseRefRegistry.sol/PurchaseRefRegistry.json`
+
+and writes:
+
+- `abis/NotaReceiptStore.json`
+- `abis/PurchaseRefRegistry.json`
+
+The deployment generator keeps `deployments/*.json` as raw deploy-script records and derives the
+typed package shape at build time.
+
+### Release
+
+```bash
+npm version patch
+npm publish --access public
+```
+
+Before publishing, make sure the npm org for the package name exists and the release account has
+access. Update `CHANGELOG.md` when ABI or deployment metadata changes.
+
+### SDK Example
+
+See [`examples/viem-read-receipt.ts`](examples/viem-read-receipt.ts) for a minimal viem query of
+Base `ReceiptPurchasedV2` events using the package exports. The example does not require private
+keys and does not write to contracts.
+
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
 Nota is intentionally limited to Receipt Mode.
