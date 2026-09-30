@@ -14,6 +14,10 @@ Nota receipt mode has two immutable contracts:
 receipt. `seller`, `buyer`, and `purchaseRef` are indexed, so reconciling a purchase reference to
 its settlement is a direct `eth_getLogs` filter on the `purchaseRef` topic.
 
+Sellers can additionally record sales that were paid outside the contract with `attestReceipt`,
+which emits `ReceiptAttested`. See [Attested Receipts](#attested-receipts) below before indexing
+it; it is not a purchase and must not be reconciled as one.
+
 ## Purchase Modes
 
 ### Use `purchaseReceipt(listingId, purchaseRef, amount)` only when:
@@ -79,6 +83,71 @@ match, quote expiry, listing status, or replay status.
 
 Listing and receipt discovery should be handled from `ListingCreated` and `ReceiptPurchasedV2`
 events or by an indexer, not by on-chain enumeration.
+
+## Attested Receipts
+
+`attestReceipt(listingId, buyer, purchaseRef, metadataHash, agentId, paymentRef)` lets the
+listing's seller record a sale that was paid somewhere other than this contract: a card rail, a
+different chain, an off-chain invoice.
+
+What it does:
+
+- consumes `purchaseRef` in the shared `PurchaseRefRegistry`, so the reference can never later be
+  purchased on this store or on any other store sharing the registry, and a reference that has
+  already been purchased cannot be attested
+- emits `ReceiptAttested(receiptId, seller, buyer, listingId, purchaseRef, metadataHash, agentId, paymentRef)`
+  with `seller`, `buyer`, and `purchaseRef` indexed, the same topic layout as `ReceiptPurchasedV2`
+- draws `receiptId` from the same counter as purchases
+
+What it does not do:
+
+- move any funds. The caller's, the seller's, and the contract's settlement-token balances are
+  untouched, no fee is charged, and no `SellerPaid`, `ProtocolFeePaid`, or `IntegratorFeePaid` is
+  emitted
+- verify that a payment happened. `ReceiptAttested` is a seller claim. Nothing on-chain backs it
+  the way a `ReceiptPurchasedV2` is backed by an actual USDC transfer
+
+Rules enforced by the contract:
+
+- only the listing's seller may call it; authorized quote signers cannot
+- the listing must exist and be active
+- `purchasesPaused` blocks it, together with the purchase paths
+- `purchaseRef` must be non-zero and not yet consumed
+- `metadataHash` must be non-zero, as on `purchaseSignedReceipt`. With no payment for the contract to
+  observe, the commitment is the only substance the attestation has
+- `buyer` may be the zero address
+- `agentId` and `paymentRef` are opaque `bytes32` values, emitted verbatim, with zero meaning
+  unspecified. The contract validates neither
+
+Known limitation: consuming the ref is replay protection, not proof of ownership. The contract checks
+that the caller owns the listing, not that the `purchaseRef` was issued by them, so a seller who learns
+another seller's unredeemed ref can consume it against their own listing for the cost of gas, after
+which the victim's quote can never be redeemed on any store sharing the registry. `purchaseReceipt` has
+always allowed the same at the cost of a purchase. Refs are high-entropy and reach only whoever holds
+the payment link, so the exposure is unredeemed quotes and the attacker is someone the link reached.
+
+Indexing guidance:
+
+- filter `ReceiptAttested` by the same `seller`, `buyer`, or `purchaseRef` topics you use for
+  `ReceiptPurchasedV2`
+- do not decode one event as the other. They have different `topic0` values, and `ReceiptAttested`
+  has no `amount` field
+- surface attestations to buyers and downstream systems as *seller-attested*, distinct from
+  on-chain-settled purchases
+
+Privacy rules are the same as on the purchase paths. `purchaseRef` is the hash; `rawPurchaseRef`
+and `purchaseRefNonce` stay off-chain. `metadataHash` must be the JCS-canonicalized commitment
+described under [Canonical Checkout Metadata](#canonical-checkout-metadata) and must never commit to
+`purchaseRefNonce`, unlock / delivery secrets, private invite links, emails, phone numbers, Telegram
+IDs / usernames, or any other buyer PII.
+
+`paymentRef` is the pointer a verifier follows to confirm the payment happened. For x402 it is the
+settlement transaction hash itself: it is already public and already a hash, and hashing it again
+would make the binding unverifiable without a side channel. Never put a raw off-chain rail identifier
+or anything that identifies the buyer in it.
+
+`attestReceipt` is not present on the Base v2 deployment; check the `deployments/` manifest for the
+address you integrate against before relying on it.
 
 ## Hashes, Metadata, and Privacy
 
@@ -164,6 +233,9 @@ fixed enum, so new checkout flows do not require a schema bump.
 Direct `purchaseReceipt` purchases emit `metadataHash = bytes32(0)`; `purchaseSignedReceipt` requires a
 non-zero `metadataHash`. The contract only ever sees and emits the resulting `bytes32`; the readable
 metadata lives in the seller backend, merchant API, bot session, or dashboard.
+
+`attestReceipt` requires a non-zero `metadataHash` and holds it to the same rules: it should be the same
+canonical commitment, and it must never commit to secrets or buyer PII.
 
 ### Purchase Reference Scoping
 

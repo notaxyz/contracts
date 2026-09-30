@@ -15,6 +15,8 @@ No escrow, no protocol fee on Base.
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
+A listing's seller can also record a sale that was paid outside the contract with `attestReceipt`. That path moves no funds and emits `ReceiptAttested`, a deliberately different event: it says the seller claims a sale happened, not that the chain saw a payment. It still consumes the `purchaseRef` in the shared `PurchaseRefRegistry`, so an attested reference can never also be purchased. `attestReceipt` is not part of the Base v2 deployment; see [Deployment](#deployment).
+
 Nota is intentionally limited to Receipt Mode.
 
 - records payment, settlement, and receipt creation on-chain
@@ -102,6 +104,18 @@ For production checkout/payment-link flows, prefer signed quotes.
 - Anyone who submits a valid unconsumed `purchaseRef` and pays first receives the receipt.
 - Suitable for simple public listings where any buyer may purchase.
 - Not recommended for seller-issued private payment links, Telegram checkout links, order-specific checkout, buyer-specific checkout, dynamic pricing, or integrator-fee flows.
+
+### `attestReceipt(listingId, buyer, purchaseRef, metadataHash, agentId, paymentRef)`
+
+- Seller-only. Records a receipt for a sale that was paid outside this contract: another rail, another chain, an off-chain invoice.
+- Moves no funds. No settlement token is transferred, no protocol or integrator fee is charged, and no `SellerPaid`, `ProtocolFeePaid`, or `IntegratorFeePaid` is emitted.
+- Emits `ReceiptAttested`, never `ReceiptPurchasedV2`. The two events have different names and therefore different `topic0` values on purpose: `ReceiptPurchasedV2` proves value moved through the contract, `ReceiptAttested` proves only that the listing's seller said so, and it carries no `amount` because the contract observed none.
+- Consumes `purchaseRef` in the shared `PurchaseRefRegistry`, exactly as the purchase paths do. A reference attested here can never be purchased afterwards, and a reference already purchased can never be attested, across every settlement contract sharing that registry.
+- Works for both listing modes. The mode governs how a buyer pays through the contract; an attestation records a payment that did not go through it. The listing must exist and be active, and `purchasesPaused` blocks attestations together with purchases.
+- `buyer` may be the zero address. `metadataHash` must be non-zero, as on the signed-quote path: with no payment for the contract to observe, the commitment is the only substance the attestation has, and it must never commit to secrets or buyer PII. `agentId` and `paymentRef` are opaque `bytes32` values emitted verbatim; zero means unspecified.
+- `paymentRef` is how a verifier follows the payment. For x402 it is the settlement transaction hash itself, already public and already a hash. Do not hash it again, which would make the binding unverifiable without a side channel, and never put a raw off-chain rail identifier or anything identifying the buyer in it.
+- Consuming the ref is replay protection, not proof of ownership: the contract checks that the caller owns the listing, not that the `purchaseRef` was issued by them. A seller who learns another seller's unredeemed ref can consume it for the cost of gas. `purchaseReceipt` has always allowed the same at the cost of a purchase. Refs are high-entropy and reach only whoever holds the payment link, so the exposure is unredeemed quotes; it is tracked as a known griefing vector.
+- `receiptId` is drawn from the same counter as purchases, so ids stay unique and ordered across `ReceiptPurchasedV2` and `ReceiptAttested`.
 
 ### `purchaseSignedReceipt(quote, sellerSignature, claimedSigner)`
 
@@ -318,6 +332,14 @@ Direct `purchaseReceipt` purchases emit `metadataHash = bytes32(0)`; `purchaseSi
 non-zero `metadataHash`. The contract only ever sees and emits the resulting `bytes32`; the readable
 metadata lives in the seller backend, merchant API, bot session, or dashboard.
 
+The same rules apply to the `metadataHash` a seller passes to `attestReceipt`, which must be non-zero: with
+no payment for the contract to observe, the commitment is the only substance the attestation has. Use the
+same JCS-canonicalized commitment described above. It must **never** commit to `purchaseRefNonce`, unlock /
+delivery secrets, private invite links, emails, phone numbers, Telegram IDs / usernames, or any other buyer
+PII. `paymentRef` on that path is the pointer a verifier follows to the payment: for x402, the settlement
+transaction hash itself, not a hash over it. Never place a raw off-chain rail identifier or anything that
+identifies the buyer in it.
+
 ### Purchase References
 
 In Receipt Mode, the Nota separates the human-readable off-chain order reference from the
@@ -429,6 +451,12 @@ discovery by seller bots, backends, dashboards, and indexers.
 Signed quote purchases emit the signed `metadataHash`; direct fixed-price purchases emit `bytes32(0)`.
 `SellerPaid` records the seller net amount after protocol and integrator fees. `ProtocolFeePaid`
 and `IntegratorFeePaid` expose the rest of the payout breakdown.
+
+`ReceiptAttested` is the record for seller-attested sales paid outside the contract. Index it
+separately from `ReceiptPurchasedV2`: it shares the `seller`, `buyer`, and `purchaseRef` topic
+layout so the same reconciliation filters work, but it has a different `topic0`, carries no
+`amount`, and is accompanied by no `SellerPaid`. Treat it as a seller claim, not as proof of
+payment.
 
 Backends can reconcile purchases by:
 
@@ -592,6 +620,7 @@ Key functions:
 - `hashPurchaseRef`
 - `purchaseReceipt`
 - `purchaseSignedReceipt`
+- `attestReceipt`
 - `quotePurchaseReceipt`
 - `previewSignedReceiptPurchase`
 - `validateSignedReceiptPurchase`
@@ -604,6 +633,7 @@ Key events:
 - `ListingStatusChanged`
 - `QuoteSignerAuthorizationChanged`
 - `ReceiptPurchasedV2`
+- `ReceiptAttested`
 - `SellerPaid`
 - `ProtocolFeePaid`
 - `IntegratorFeePaid`
@@ -693,6 +723,12 @@ forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast --verif
 The Arbitrum One deployment in `deployments/arbitrum-one.json` is the June 2026 v1 contract
 named `RevealReceiptStore` in verified source and manifests. It remains live for historical
 integrations, but Base is the canonical v2 deployment path.
+
+The Base v2 contract was deployed from commit `bb6935e`, before `attestReceipt` and
+`ReceiptAttested` existed. It does not carry them, and cannot: the contract is not upgradeable.
+Any deployment built from this source or later is therefore not the same code as Base v2, and its
+entry in `deployments/` must say so explicitly, so the deployment table never implies two
+addresses expose the same surface when they do not.
 
 After deployment, record:
 
