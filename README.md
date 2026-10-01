@@ -731,6 +731,17 @@ Any deployment built from this source or later is therefore not the same code as
 entry in `deployments/` must say so explicitly, so the deployment table never implies two
 addresses expose the same surface when they do not.
 
+The Arbitrum Sepolia deployment in `deployments/arbitrum-sepolia-attest.json` is a testnet build of
+this source, with `attestReceipt` and `ReceiptAttested`. It is not the same code as Base v2. It
+mirrors the Base shipping configuration: zero protocol fee and no fee recipient, which the deploy
+script enforces on Arbitrum Sepolia as it does on Base mainnet. It uses its own
+`PurchaseRefRegistry` and does not share replay protection with any other deployment, including
+the June 2026 v1 testnet contract in `deployments/arbitrum-sepolia.json`.
+
+- `NotaReceiptStore`: `0x6b13e2077c84e1326111acBbb618E028723e2EA2`
+- `PurchaseRefRegistry`: `0x32aAeC7768adBBFD65C776b129616b8727d0c8bd`
+- Settlement token: Circle test USDC `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
+
 After deployment, record:
 
 - chain ID
