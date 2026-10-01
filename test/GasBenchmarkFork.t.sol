@@ -20,6 +20,10 @@ import {NotaReceiptStore} from "../src/NotaReceiptStore.sol";
 ///          slots cold and zero; `repeatSale` pre-funds them, which is the steady state and
 ///          turns each payout SSTORE from zero->non-zero into non-zero->non-zero.
 ///
+///      `attestReceipt` is measured in every suite but varies on neither axis: it moves no
+///      settlement token, so it charges no fee and touches no recipient balance slot. Its
+///      numbers should match across all four suites of a chain.
+///
 ///      Suites self-skip when their RPC env var is unset, so `forge test` stays green offline.
 abstract contract GasBenchmarkFork is Test {
     uint256 internal constant SELLER_PK = 0xA11CE;
@@ -178,6 +182,19 @@ abstract contract GasBenchmarkFork is Test {
         uint256 used = g0 - gasleft();
 
         _report("purchaseSignedReceipt.integratorFee", used);
+    }
+
+    function test_gas_attestReceipt() public {
+        _coolAll();
+
+        vm.prank(seller);
+        uint256 g0 = gasleft();
+        store.attestReceipt(
+            1, buyer, keccak256("ref-attest"), METADATA_HASH, bytes32(0), keccak256("gas-benchmark-payment")
+        );
+        uint256 used = g0 - gasleft();
+
+        _report("attestReceipt", used);
     }
 
     function test_gas_approve() public {

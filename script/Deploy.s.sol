@@ -9,7 +9,8 @@ import {NotaReceiptStore} from "../src/NotaReceiptStore.sol";
 
 contract Deploy is Script {
     uint256 internal constant MAX_PROTOCOL_FEE_BPS = 50;
-    /// @dev Launch fee for every chain except Base mainnet, which is pinned to zero below.
+    /// @dev Launch fee for every chain except Base mainnet and Arbitrum Sepolia, which are
+    ///      pinned to zero below.
     ///      Update this constant deliberately when the launch fee changes.
     uint256 internal constant EXPECTED_PROTOCOL_FEE_BPS = 50;
     /// @dev Base mainnet launches with a zero protocol fee, immutable in the constructor: the
@@ -19,6 +20,9 @@ contract Deploy is Script {
     ///      boundary rather than left to the operator's env file. If a fee is ever right it
     ///      belongs on the reconciliation API, not on settlement.
     uint256 internal constant BASE_MAINNET_EXPECTED_PROTOCOL_FEE_BPS = 0;
+    /// @dev Arbitrum Sepolia mirrors the zero-fee shipping configuration, so the testnet
+    ///      exercises the same contract surface integrators see on Base mainnet.
+    uint256 internal constant ARBITRUM_SEPOLIA_EXPECTED_PROTOCOL_FEE_BPS = 0;
     /// @dev Receipt settlement assumes a 6-decimal token such as USDC.
     uint8 internal constant EXPECTED_SETTLEMENT_TOKEN_DECIMALS = 6;
     /// @dev Arbitrum One mainnet chain id.
@@ -27,6 +31,8 @@ contract Deploy is Script {
     address internal constant ARBITRUM_ONE_NATIVE_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     /// @dev Base mainnet chain id.
     uint256 internal constant BASE_MAINNET_CHAIN_ID = 8453;
+    /// @dev Arbitrum Sepolia testnet chain id.
+    uint256 internal constant ARBITRUM_SEPOLIA_CHAIN_ID = 421614;
     /// @dev Circle's native USDC on Base. USDbC (bridged) is intentionally not accepted.
     address internal constant BASE_MAINNET_NATIVE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
 
@@ -74,6 +80,8 @@ contract Deploy is Script {
             // Leave no fee destination on-chain, so "zero fee, cannot be turned on" is a property
             // an integrator can read off the deployed contract rather than a promise.
             require(feeRecipient == address(0), "Base mainnet: FEE_RECIPIENT must be zero at zero fee");
+        } else if (block.chainid == ARBITRUM_SEPOLIA_CHAIN_ID) {
+            require(feeRecipient == address(0), "Arbitrum Sepolia: FEE_RECIPIENT must be zero at zero fee");
         }
         uint8 settlementTokenDecimals = _validateSettlementToken(settlementToken);
 
@@ -111,11 +119,14 @@ contract Deploy is Script {
         console2.log("ReceiptStoreOwner:", receiptStore.owner());
     }
 
-    /// @dev Expected protocol fee for the chain being deployed to. Base mainnet is pinned to
-    ///      zero; every other chain uses the standard launch fee.
+    /// @dev Expected protocol fee for the chain being deployed to. Base mainnet and Arbitrum
+    ///      Sepolia are pinned to zero; every other chain uses the standard launch fee.
     function _expectedProtocolFeeBps() internal view returns (uint256) {
         if (block.chainid == BASE_MAINNET_CHAIN_ID) {
             return BASE_MAINNET_EXPECTED_PROTOCOL_FEE_BPS;
+        }
+        if (block.chainid == ARBITRUM_SEPOLIA_CHAIN_ID) {
+            return ARBITRUM_SEPOLIA_EXPECTED_PROTOCOL_FEE_BPS;
         }
         return EXPECTED_PROTOCOL_FEE_BPS;
     }

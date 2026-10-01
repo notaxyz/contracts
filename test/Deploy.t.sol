@@ -42,6 +42,7 @@ contract DeployTest is Test {
     uint256 internal constant ARBITRUM_ONE_CHAIN_ID = 42161;
     address internal constant ARBITRUM_ONE_NATIVE_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     uint256 internal constant ARBITRUM_SEPOLIA_CHAIN_ID = 421614;
+    uint256 internal constant ETHEREUM_SEPOLIA_CHAIN_ID = 11155111;
 
     uint256 internal constant DEPLOYER_PK = 0xD3910E7;
     string internal constant FEE_MISMATCH_ERROR =
@@ -131,9 +132,40 @@ contract DeployTest is Test {
         deployScript.run();
     }
 
-    /// @dev Testnets keep the launch fee and are not pinned to a specific token address.
-    function test_Testnet_KeepsLaunchFeeAndUnpinnedToken() public {
+    /// @dev Arbitrum Sepolia mirrors the Base shipping configuration: zero fee, no fee recipient,
+    ///      and an unpinned test token.
+    function test_ArbitrumSepolia_DeploysWithZeroFeeAndNoFeeRecipient() public {
         vm.chainId(ARBITRUM_SEPOLIA_CHAIN_ID);
+        address testUsdc = address(new DeployMockUSDC());
+        _configure(testUsdc, 0, address(0));
+
+        (PurchaseRefRegistry registry, NotaReceiptStore receiptStore) = deployScript.run();
+
+        assertEq(receiptStore.PROTOCOL_FEE_BPS(), 0);
+        assertEq(receiptStore.FEE_RECIPIENT(), address(0));
+        assertEq(address(receiptStore.SETTLEMENT_TOKEN()), testUsdc);
+        assertTrue(registry.authorizedConsumers(address(receiptStore)));
+    }
+
+    function test_ArbitrumSepolia_RejectsNonZeroProtocolFee() public {
+        vm.chainId(ARBITRUM_SEPOLIA_CHAIN_ID);
+        _configure(address(new DeployMockUSDC()), 50, address(0xFEE));
+
+        vm.expectRevert(bytes(FEE_MISMATCH_ERROR));
+        deployScript.run();
+    }
+
+    function test_ArbitrumSepolia_RejectsFeeRecipientAtZeroFee() public {
+        vm.chainId(ARBITRUM_SEPOLIA_CHAIN_ID);
+        _configure(address(new DeployMockUSDC()), 0, address(0xFEE));
+
+        vm.expectRevert("Arbitrum Sepolia: FEE_RECIPIENT must be zero at zero fee");
+        deployScript.run();
+    }
+
+    /// @dev Other testnets keep the launch fee and are not pinned to a specific token address.
+    function test_Testnet_KeepsLaunchFeeAndUnpinnedToken() public {
+        vm.chainId(ETHEREUM_SEPOLIA_CHAIN_ID);
         address testUsdc = address(new DeployMockUSDC());
         _configure(testUsdc, 50, address(0xFEE));
 

@@ -131,6 +131,7 @@ contract NotaReceiptStoreTest is Test {
     bytes32 purchaseRef2 = keccak256("purchase-2");
     bytes32 purchaseRefNonce = keccak256("nonce-1");
     bytes32 purchaseRefNonce2 = keccak256("nonce-2");
+    bytes32 paymentRef = keccak256("payment-1");
 
     function setUp() public {
         usdc = new ReceiptMockUSDC();
@@ -453,6 +454,47 @@ contract NotaReceiptStoreTest is Test {
         }
 
         revert("no ReceiptPurchasedV2 event recorded");
+    }
+
+    /// @dev Decoded `ReceiptAttested` log. Kept as a separate struct from `EmittedReceipt` on
+    ///      purpose: an attestation carries no `amount`, and the two must not be conflated.
+    struct EmittedAttestation {
+        uint256 receiptId;
+        address seller;
+        address buyer;
+        uint256 listingId;
+        bytes32 purchaseRef;
+        bytes32 metadataHash;
+        bytes32 agentId;
+        bytes32 paymentRef;
+    }
+
+    bytes32 internal constant RECEIPT_ATTESTED_TOPIC =
+        keccak256("ReceiptAttested(uint256,address,address,uint256,bytes32,bytes32,bytes32,bytes32)");
+    bytes32 internal constant PURCHASE_REF_CONSUMED_TOPIC = keccak256("PurchaseRefConsumed(bytes32,address,uint64)");
+
+    /// @dev Most recent `ReceiptAttested` emitted since logs were last drained.
+    function _lastEmittedAttestation() internal view returns (EmittedAttestation memory attestation) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        for (uint256 i = logs.length; i > 0; i--) {
+            Vm.Log memory entry = logs[i - 1];
+            if (entry.topics.length != 4 || entry.topics[0] != RECEIPT_ATTESTED_TOPIC) continue;
+
+            attestation.seller = address(uint160(uint256(entry.topics[1])));
+            attestation.buyer = address(uint160(uint256(entry.topics[2])));
+            attestation.purchaseRef = entry.topics[3];
+            (
+                attestation.receiptId,
+                attestation.listingId,
+                attestation.metadataHash,
+                attestation.agentId,
+                attestation.paymentRef
+            ) = abi.decode(entry.data, (uint256, uint256, bytes32, bytes32, bytes32));
+            return attestation;
+        }
+
+        revert("no ReceiptAttested event recorded");
     }
 
     function _assertRegistryConsumption(bytes32 ref, address expectedConsumer) internal view {
@@ -3336,6 +3378,453 @@ contract NotaReceiptStoreTest is Test {
                 assertEq(loggedMetadataHash, bytes32(0));
                 break;
             }
+        }
+
+        assertTrue(found);
+    }
+
+    // -------------------------------------------------------------------------
+    // attestReceipt: seller-attested receipts for sales paid outside the contract
+    // -------------------------------------------------------------------------
+
+    function _attestReceiptAs(address who, uint256 listingId, address attestedBuyer, bytes32 ref)
+        internal
+        returns (uint256 receiptId)
+    {
+        receiptId = _attestReceiptAs(store, who, listingId, attestedBuyer, ref);
+    }
+
+    function _attestReceiptAs(
+        NotaReceiptStore targetStore,
+        address who,
+        uint256 listingId,
+        address attestedBuyer,
+        bytes32 ref
+    ) internal returns (uint256 receiptId) {
+        vm.prank(who);
+        receiptId = targetStore.attestReceipt(listingId, attestedBuyer, ref, metadataHash, bytes32(0), paymentRef);
+    }
+
+    /// @dev The load-bearing property: an attestation is a receipt record with no settlement leg.
+    ///      Every balance the purchase paths touch is asserted unchanged, and the seller is given
+    ///      a balance first so "unchanged" is not trivially `0 == 0`.
+    function test_AttestReceipt_EmitsReceiptAndMovesNoFunds() public {
+        uint256 listingId = _createListingAsSeller();
+        bytes32 agentId = keccak256("erc8004:agent:42");
+        usdc.mint(seller, 1_000_000_000);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+        uint256 storeBalanceBefore = usdc.balanceOf(address(store));
+
+        _assertRegistryNotConsumed(purchaseRef);
+
+        vm.expectEmit(true, true, true, true, address(store));
+        emit NotaReceiptStore.ReceiptAttested(
+            1, seller, buyer, listingId, purchaseRef, metadataHash, agentId, paymentRef
+        );
+
+        vm.prank(seller);
+        uint256 receiptId = store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, agentId, paymentRef);
+
+        assertEq(receiptId, 1);
+        assertEq(store.nextReceiptId(), 2);
+
+        EmittedAttestation memory attestation = _lastEmittedAttestation();
+        assertEq(attestation.receiptId, receiptId);
+        assertEq(attestation.seller, seller);
+        assertEq(attestation.buyer, buyer);
+        assertEq(attestation.listingId, listingId);
+        assertEq(attestation.purchaseRef, purchaseRef);
+        assertEq(attestation.metadataHash, metadataHash);
+        assertEq(attestation.agentId, agentId);
+        assertEq(attestation.paymentRef, paymentRef);
+
+        _assertRegistryConsumption(purchaseRef, address(store));
+
+        // The caller is the seller on this path, so the seller assertion is also the caller assertion.
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore);
+        assertEq(usdc.balanceOf(feeRecipient), feeRecipientBalanceBefore);
+        assertEq(usdc.balanceOf(address(store)), storeBalanceBefore);
+        assertEq(usdc.balanceOf(address(store)), 0);
+    }
+
+    /// @dev No `ReceiptPurchasedV2`, no `SellerPaid`, no ERC-20 `Transfer`: exactly the registry
+    ///      consumption followed by the attestation, in that order.
+    function test_AttestReceipt_EmitsOnlyRegistryConsumptionAndAttestation() public {
+        uint256 listingId = _createListingAsSeller();
+        usdc.mint(seller, 1_000_000_000);
+        vm.getRecordedLogs();
+
+        _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 2);
+        assertEq(logs[0].emitter, address(registry));
+        assertEq(logs[0].topics[0], PURCHASE_REF_CONSUMED_TOPIC);
+        assertEq(logs[0].topics[1], purchaseRef);
+        assertEq(logs[1].emitter, address(store));
+        assertEq(logs[1].topics[0], RECEIPT_ATTESTED_TOPIC);
+    }
+
+    function test_AttestReceipt_EmitsPurchaseRefConsumedFromRegistry() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit PurchaseRefRegistry.PurchaseRefConsumed(purchaseRef, address(store), uint64(block.timestamp));
+
+        _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+    }
+
+    function test_AttestReceipt_NonSellerReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        // The contract owner, the attested buyer, a stranger, and a different seller: none of
+        // them own this listing.
+        address[4] memory callers = [address(this), buyer, attacker, seller2];
+
+        for (uint256 i; i < callers.length; ++i) {
+            vm.prank(callers[i]);
+            vm.expectRevert(NotaReceiptStore.NotListingSeller.selector);
+            store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+        }
+
+        _assertRegistryNotConsumed(purchaseRef);
+    }
+
+    /// @dev A listing-authorized quote signer may sign quotes, but attesting is the seller's alone.
+    function test_AttestReceipt_AuthorizedQuoteSignerCannotAttest() public {
+        uint256 listingId = _createListingAsSeller();
+        _setListingQuoteSigner(store, seller, listingId, quoteSigner, true);
+
+        vm.prank(quoteSigner);
+        vm.expectRevert(NotaReceiptStore.NotListingSeller.selector);
+        store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+    }
+
+    function test_AttestReceipt_DuplicatePurchaseRefReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        uint256 receiptId = _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+
+        // Nor on another listing of the same seller: the ref is registry-scoped, not listing-scoped.
+        uint256 listingId2 = _createListingAs(seller, listingHash2);
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.attestReceipt(listingId2, buyer2, purchaseRef, metadataHash2, bytes32(0), paymentRef);
+
+        assertEq(receiptId, 1);
+        assertEq(store.nextReceiptId(), 2);
+    }
+
+    function test_AttestReceipt_DifferentPurchaseRefsStillWork() public {
+        uint256 listingId = _createListingAsSeller();
+
+        assertEq(_attestReceiptAs(seller, listingId, buyer, purchaseRef), 1);
+        assertEq(_attestReceiptAs(seller, listingId, buyer2, purchaseRef2), 2);
+
+        _assertRegistryConsumption(purchaseRef, address(store));
+        _assertRegistryConsumption(purchaseRef2, address(store));
+    }
+
+    function test_AttestReceipt_PurchaseRefConsumedByPurchaseReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        _purchaseReceiptAs(listingId, buyer, purchaseRef);
+
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+    }
+
+    function test_AttestReceipt_PurchaseRefConsumedBySignedPurchaseReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 hours));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+        _purchaseSignedReceiptAs(store, buyer, quote, signature);
+
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+    }
+
+    function test_PurchaseReceipt_PurchaseRefConsumedByAttestationReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), unitPrice);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseReceipt(listingId, purchaseRef, unitPrice);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore);
+        _assertRegistryConsumption(purchaseRef, address(store));
+    }
+
+    function test_PurchaseSignedReceipt_PurchaseRefConsumedByAttestationReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 hours));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseSignedReceipt(quote, signature, address(0));
+        vm.stopPrank();
+    }
+
+    function test_ValidateSignedReceiptPurchase_PurchaseRefConsumedByAttestationReverts() public {
+        uint256 listingId = _createListingAsSeller();
+        _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+        NotaReceiptStore.SignedReceiptQuote memory quote =
+            _makeSignedReceiptQuote(listingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 hours));
+        bytes memory signature = _signSignedReceiptQuote(store, SELLER_PK, quote);
+
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.validateSignedReceiptPurchase(quote, signature, buyer, address(0));
+    }
+
+    function test_AttestReceipt_SharedRegistryBlocksReplayAcrossStores() public {
+        NotaReceiptStore secondStore = _deployStore(0, address(this), registry);
+        uint256 listingId1 = _createListingAs(store, seller, listingHash);
+        uint256 listingId2 = _createListingAs(secondStore, seller2, listingHash2);
+
+        _attestReceiptAs(store, seller, listingId1, buyer, purchaseRef);
+        assertEq(registry.consumedBy(purchaseRef), address(store));
+
+        vm.prank(seller2);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        secondStore.attestReceipt(listingId2, buyer2, purchaseRef, metadataHash, bytes32(0), paymentRef);
+    }
+
+    function test_AttestReceipt_RevertsWhenStoreNotAuthorizedInRegistry() public {
+        PurchaseRefRegistry unauthorizedRegistry = new PurchaseRefRegistry(address(this));
+        NotaReceiptStore unauthorizedStore =
+            new NotaReceiptStore(address(usdc), address(unauthorizedRegistry), feeRecipient, 0, address(this));
+        uint256 listingId = _createListingAs(unauthorizedStore, seller, listingHash);
+
+        vm.prank(seller);
+        vm.expectRevert(
+            abi.encodeWithSelector(PurchaseRefRegistry.UnauthorizedConsumer.selector, address(unauthorizedStore))
+        );
+        unauthorizedStore.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+    }
+
+    function test_AttestReceipt_InactiveListingReverts() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(seller);
+        store.setListingActive(listingId, false);
+
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.ListingInactive.selector);
+        store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+        _assertRegistryNotConsumed(purchaseRef);
+
+        vm.prank(seller);
+        store.setListingActive(listingId, true);
+
+        _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+        _assertRegistryConsumption(purchaseRef, address(store));
+    }
+
+    function test_AttestReceipt_NonexistentListingReverts() public {
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.ListingNotFound.selector);
+        store.attestReceipt(999, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+
+        _assertRegistryNotConsumed(purchaseRef);
+    }
+
+    /// @dev The mode governs how a buyer may pay through the contract. An attestation records a
+    ///      payment that did not go through it, so both modes accept one.
+    function test_AttestReceipt_SignedQuoteOnlyListingAccepted() public {
+        uint256 listingId =
+            _createListingAs(store, seller, listingHash, 0, NotaReceiptStore.ListingMode.SignedQuoteOnly);
+
+        uint256 receiptId = _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+
+        assertEq(receiptId, 1);
+        assertEq(_lastEmittedAttestation().listingId, listingId);
+        _assertRegistryConsumption(purchaseRef, address(store));
+    }
+
+    function test_PurchasesPause_BlocksAttestReceipt() public {
+        uint256 listingId = _createListingAsSeller();
+
+        store.setPurchasesPaused(true);
+
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.PurchasesPaused.selector);
+        store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), paymentRef);
+        _assertRegistryNotConsumed(purchaseRef);
+
+        store.setPurchasesPaused(false);
+
+        _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+        _assertRegistryConsumption(purchaseRef, address(store));
+    }
+
+    function test_AttestReceipt_ZeroBuyerAccepted() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.expectEmit(true, true, true, true, address(store));
+        emit NotaReceiptStore.ReceiptAttested(
+            1, seller, address(0), listingId, purchaseRef, metadataHash, bytes32(0), paymentRef
+        );
+
+        uint256 receiptId = _attestReceiptAs(seller, listingId, address(0), purchaseRef);
+
+        assertEq(receiptId, 1);
+        assertEq(_lastEmittedAttestation().buyer, address(0));
+        _assertRegistryConsumption(purchaseRef, address(store));
+    }
+
+    function test_AttestReceipt_ZeroPurchaseRefReverts() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.InvalidPurchaseRef.selector);
+        store.attestReceipt(listingId, buyer, bytes32(0), metadataHash, bytes32(0), paymentRef);
+    }
+
+    /// @dev With no payment for the contract to observe, the commitment is the only substance an
+    ///      attestation has. A zero `metadataHash` would burn a `purchaseRef` while committing to
+    ///      nothing, so it is rejected exactly as on `purchaseSignedReceipt`.
+    function test_AttestReceipt_ZeroMetadataHashReverts() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.prank(seller);
+        vm.expectRevert(NotaReceiptStore.InvalidParams.selector);
+        store.attestReceipt(listingId, buyer, purchaseRef, bytes32(0), bytes32(0), paymentRef);
+
+        _assertRegistryNotConsumed(purchaseRef);
+    }
+
+    /// @dev `agentId` and `paymentRef` remain optional: zero means unspecified. Pinned explicitly
+    ///      because the fuzzer is not guaranteed to land on it.
+    function test_AttestReceipt_ZeroAgentIdAndPaymentRefAccepted() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.expectEmit(true, true, true, true, address(store));
+        emit NotaReceiptStore.ReceiptAttested(
+            1, seller, buyer, listingId, purchaseRef, metadataHash, bytes32(0), bytes32(0)
+        );
+
+        vm.prank(seller);
+        store.attestReceipt(listingId, buyer, purchaseRef, metadataHash, bytes32(0), bytes32(0));
+
+        EmittedAttestation memory attestation = _lastEmittedAttestation();
+        assertEq(attestation.metadataHash, metadataHash);
+        assertEq(attestation.agentId, bytes32(0));
+        assertEq(attestation.paymentRef, bytes32(0));
+    }
+
+    /// @dev `metadataHash`, `agentId`, and `paymentRef` are opaque: beyond `metadataHash` being
+    ///      non-zero, the contract validates none of them and emits each verbatim.
+    function testFuzz_AttestReceipt_OpaqueFieldsAreEmittedVerbatim(
+        bytes32 fuzzMetadataHash,
+        bytes32 fuzzAgentId,
+        bytes32 fuzzPaymentRef
+    ) public {
+        vm.assume(fuzzMetadataHash != bytes32(0));
+        uint256 listingId = _createListingAsSeller();
+
+        vm.expectEmit(true, true, true, true, address(store));
+        emit NotaReceiptStore.ReceiptAttested(
+            1, seller, buyer, listingId, purchaseRef, fuzzMetadataHash, fuzzAgentId, fuzzPaymentRef
+        );
+
+        vm.prank(seller);
+        uint256 receiptId =
+            store.attestReceipt(listingId, buyer, purchaseRef, fuzzMetadataHash, fuzzAgentId, fuzzPaymentRef);
+
+        assertEq(receiptId, 1);
+
+        EmittedAttestation memory attestation = _lastEmittedAttestation();
+        assertEq(attestation.metadataHash, fuzzMetadataHash);
+        assertEq(attestation.agentId, fuzzAgentId);
+        assertEq(attestation.paymentRef, fuzzPaymentRef);
+        _assertRegistryConsumption(purchaseRef, address(store));
+    }
+
+    /// @dev Known griefing vector, pinned so the tracking issue has a repro and a fix flips a
+    ///      named test. The contract checks that the caller owns the listing, not that the
+    ///      `purchaseRef` was issued by them: a seller who learns another seller's unredeemed ref
+    ///      can consume it against their own listing for the cost of gas, and the victim's quote
+    ///      can then never be redeemed on any store sharing the registry. `purchaseReceipt` has
+    ///      always permitted the same at the cost of a purchase.
+    function test_AttestReceipt_CanConsumeAnotherSellersUnredeemedRef_KnownGriefingVector() public {
+        uint256 victimListingId = _createListingAsSeller();
+        uint256 attackerListingId = _createListingAs(seller2, listingHash2);
+        NotaReceiptStore.SignedReceiptQuote memory victimQuote = _makeSignedReceiptQuote(
+            victimListingId, buyer, purchaseRef, quotedAmount, uint64(block.timestamp + 1 hours)
+        );
+        bytes memory victimSignature = _signSignedReceiptQuote(store, SELLER_PK, victimQuote);
+
+        _attestReceiptAs(seller2, attackerListingId, address(0), purchaseRef);
+        _assertRegistryConsumption(purchaseRef, address(store));
+
+        vm.startPrank(buyer);
+        usdc.approve(address(store), quotedAmount);
+        vm.expectRevert(NotaReceiptStore.PurchaseRefAlreadyUsed.selector);
+        store.purchaseSignedReceipt(victimQuote, victimSignature, address(0));
+        vm.stopPrank();
+    }
+
+    /// @dev Attestations and purchases draw from one `nextReceiptId`, so ids stay unique and
+    ///      ordered across both events.
+    function test_AttestReceipt_SharesReceiptIdCounterWithPurchases() public {
+        uint256 listingId = _createListingAsSeller();
+
+        assertEq(_purchaseReceiptAs(listingId, buyer, purchaseRef), 1);
+        assertEq(_attestReceiptAs(seller, listingId, buyer2, purchaseRef2), 2);
+        assertEq(_purchaseReceiptAs(listingId, buyer, _makePurchaseRef(3)), 3);
+        assertEq(store.nextReceiptId(), 4);
+    }
+
+    /// @dev The topic layout matches `ReceiptPurchasedV2` so the same `eth_getLogs` filters on
+    ///      `seller`, `buyer`, and `purchaseRef` resolve attestations, while `topic0` differs so
+    ///      the two can never be decoded as one another.
+    function test_ReceiptAttested_EventIndexesSellerBuyerAndPurchaseRefWithDistinctTopic() public {
+        uint256 listingId = _createListingAsSeller();
+
+        vm.recordLogs();
+        uint256 receiptId = _attestReceiptAs(seller, listingId, buyer, purchaseRef);
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+
+        assertTrue(RECEIPT_ATTESTED_TOPIC != RECEIPT_PURCHASED_TOPIC);
+        bool found;
+
+        for (uint256 i; i < entries.length; ++i) {
+            if (entries[i].topics.length == 4 && entries[i].topics[0] == RECEIPT_ATTESTED_TOPIC) {
+                found = true;
+                assertEq(entries[i].topics[1], bytes32(uint256(uint160(seller))));
+                assertEq(entries[i].topics[2], bytes32(uint256(uint160(buyer))));
+                assertEq(entries[i].topics[3], purchaseRef);
+
+                (
+                    uint256 loggedReceiptId,
+                    uint256 loggedListingId,
+                    bytes32 loggedMetadataHash,
+                    bytes32 loggedAgentId,
+                    bytes32 loggedPaymentRef
+                ) = abi.decode(entries[i].data, (uint256, uint256, bytes32, bytes32, bytes32));
+
+                assertEq(loggedReceiptId, receiptId);
+                assertEq(loggedListingId, listingId);
+                assertEq(loggedMetadataHash, metadataHash);
+                assertEq(loggedAgentId, bytes32(0));
+                assertEq(loggedPaymentRef, paymentRef);
+            }
+            assertTrue(entries[i].topics[0] != RECEIPT_PURCHASED_TOPIC);
         }
 
         assertTrue(found);

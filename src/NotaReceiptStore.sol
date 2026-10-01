@@ -18,10 +18,12 @@ import {PurchaseRefRegistry} from "./PurchaseRefRegistry.sol";
 ///      mode. `PublicFixedPrice` listings can be purchased directly at a public unit price, while
 ///      `SignedQuoteOnly` listings require a seller-authorized EIP-712 quote. In both modes,
 ///      settlement completes immediately and emits `ReceiptPurchasedV2`, which is the receipt: no
-///      per-receipt storage is written. Replay protection is enforced canonically through a shared
-///      `PurchaseRefRegistry`. Listing and receipt discovery is expected to be handled from events
-///      by indexers or seller systems; `purchaseRef` is an indexed topic so reconciliation works
-///      from a plain `eth_getLogs` filter as well.
+///      per-receipt storage is written. A listing's seller may also record a sale that was paid
+///      outside this contract with `attestReceipt`, which moves no funds and emits
+///      `ReceiptAttested` instead. Replay protection for both paths is enforced canonically
+///      through a shared `PurchaseRefRegistry`. Listing and receipt discovery is expected to be
+///      handled from events by indexers or seller systems; `purchaseRef` is an indexed topic so
+///      reconciliation works from a plain `eth_getLogs` filter as well.
 contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
     using SafeERC20 for IERC20;
 
@@ -260,6 +262,42 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         uint256 amount,
         bytes32 metadataHash,
         bytes32 agentId
+    );
+
+    /// @notice Seller-attested receipt for a sale that was paid outside this contract.
+    /// @dev This is deliberately a different event from `ReceiptPurchasedV2`, not a variant of
+    ///      it. `ReceiptPurchasedV2` proves that settlement-token value moved through this
+    ///      contract; `ReceiptAttested` proves only that the listing's seller said a sale
+    ///      happened. It carries no `amount` because the contract observed no payment, and an
+    ///      indexer that treats the two as interchangeable is wrong. The distinct name gives the
+    ///      two events distinct `topic0` values so they cannot be confused by accident.
+    ///
+    ///      The topic layout mirrors `ReceiptPurchasedV2` on purpose: `seller`, `buyer`, and
+    ///      `purchaseRef` are indexed so the same `eth_getLogs` reconciliation filters work,
+    ///      and `purchaseRef` lives in the shared `PurchaseRefRegistry`, so a ref consumed by an
+    ///      attestation can never also be consumed by a purchase, on this store or any other
+    ///      store sharing the registry.
+    ///
+    ///      `receiptId` is drawn from the same `nextReceiptId` counter as purchases, so ids are
+    ///      unique and ordered across both events. `buyer` may be the zero address when the
+    ///      seller does not know or does not wish to record a wallet. `metadataHash` is the
+    ///      substance of the attestation: with no payment for the contract to observe, the
+    ///      commitment is the only thing the seller is putting on record, so it MUST be non-zero,
+    ///      follows the same rules as on the signed-quote path, and MUST NOT commit to secrets or
+    ///      buyer PII. `agentId` and `paymentRef` are opaque values the contract neither
+    ///      validates nor interprets; zero means unspecified for both. `paymentRef` identifies
+    ///      the external payment so a verifier can follow it: for x402 it is the settlement
+    ///      transaction hash itself, already public and already a hash, not a hash over it.
+    ///      Never place a raw off-chain rail identifier or anything identifying the buyer here.
+    event ReceiptAttested(
+        uint256 receiptId,
+        address indexed seller,
+        address indexed buyer,
+        uint256 listingId,
+        bytes32 indexed purchaseRef,
+        bytes32 metadataHash,
+        bytes32 agentId,
+        bytes32 paymentRef
     );
 
     event ProtocolFeePaid(
@@ -840,6 +878,78 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
                 integratorFeeAmount: quote.integratorFeeAmount
             })
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Attestation Functions
+    // -------------------------------------------------------------------------
+
+    /// @notice Record a seller-attested receipt for a listing sale that was paid outside this
+    ///         contract, consuming `purchaseRef` in the shared registry without moving funds.
+    /// @dev Only the listing's seller may call this. Nothing is transferred: no settlement token
+    ///      leaves the caller, no fee is charged, and no `SellerPaid` or fee event is emitted.
+    ///      The call emits `ReceiptAttested`, never `ReceiptPurchasedV2`, because the contract
+    ///      did not observe a payment and must not claim to have. What it does guarantee is
+    ///      replay protection: `purchaseRef` is consumed through `PURCHASE_REF_REGISTRY`, the
+    ///      same registry the purchase paths use, so a ref attested here can never later be
+    ///      bought, and a ref already bought can never be attested, across every settlement
+    ///      contract sharing that registry.
+    ///
+    ///      Valid for both listing modes. The listing mode governs how a buyer may pay through
+    ///      this contract; an attestation records a payment that did not go through it, so the
+    ///      mode does not apply. The listing must exist and be active, and the call is blocked
+    ///      by `purchasesPaused` together with the purchase paths so the owner has one switch
+    ///      that stops all new receipts.
+    ///
+    ///      `purchaseRef` is the seller-scoped `bytes32` hash, normally
+    ///      `hashPurchaseRef(seller, listingId, rawPurchaseRef, purchaseRefNonce)`; the raw
+    ///      reference and its nonce stay off-chain exactly as on the purchase paths and must
+    ///      never be passed here. `buyer` may be the zero address. `metadataHash` MUST be
+    ///      non-zero, as on `purchaseSignedReceipt`: an attestation with nothing committed would
+    ///      assert "I sold something" while saying nothing and still burn a `purchaseRef`. It
+    ///      MUST NOT commit to secrets or buyer PII (never `purchaseRefNonce`, unlock/delivery
+    ///      secrets, private invite links, emails, phone numbers, or Telegram handles); see
+    ///      "Canonical Checkout Metadata" in the README. `agentId` and `paymentRef` are opaque
+    ///      and emitted verbatim, zero included. `paymentRef` is how a verifier follows the
+    ///      payment: for x402 pass the settlement transaction hash itself. Do not hash it again,
+    ///      which would make the binding unverifiable without a side channel; do not put a raw
+    ///      off-chain rail identifier or anything identifying the buyer in it.
+    ///
+    ///      Consuming the ref is replay protection, not proof of ownership. The contract checks
+    ///      that the caller owns `listingId`, but nothing ties `purchaseRef` to that seller: the
+    ///      registry sees only the hash. A seller who learns another seller's unredeemed
+    ///      `purchaseRef` can attest it against their own listing and consume it forever, on
+    ///      this store and every store sharing the registry. `purchaseReceipt` has always
+    ///      allowed the same thing at the price of a purchase; here it costs only gas. The
+    ///      exposure is bounded to unredeemed quotes, because refs are high-entropy and reach
+    ///      only whoever holds the payment link, but it is a griefing vector and is tracked as
+    ///      one.
+    function attestReceipt(
+        uint256 listingId,
+        address buyer,
+        bytes32 purchaseRef,
+        bytes32 metadataHash,
+        bytes32 agentId,
+        bytes32 paymentRef
+    ) external nonReentrant listingExists(listingId) returns (uint256 receiptId) {
+        if (purchasesPaused) revert PurchasesPaused();
+        _onlyListingSeller(listingId);
+        Listing storage listing = listings[listingId];
+
+        if (!listing.active) revert ListingInactive();
+        _validatePurchaseRef(purchaseRef);
+        if (metadataHash == bytes32(0)) revert InvalidParams();
+        // Not dead code: `consume` would revert on its own, but with the registry's error.
+        // Checking first surfaces `PurchaseRefAlreadyUsed`, matching the purchase paths.
+        if (PURCHASE_REF_REGISTRY.isConsumed(purchaseRef)) {
+            revert PurchaseRefAlreadyUsed();
+        }
+
+        PURCHASE_REF_REGISTRY.consume(purchaseRef);
+
+        receiptId = nextReceiptId++;
+
+        emit ReceiptAttested(receiptId, msg.sender, buyer, listingId, purchaseRef, metadataHash, agentId, paymentRef);
     }
 
     // -------------------------------------------------------------------------
