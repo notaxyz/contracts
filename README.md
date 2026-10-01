@@ -108,6 +108,7 @@ For production checkout/payment-link flows, prefer signed quotes.
 ### `attestReceipt(listingId, buyer, purchaseRef, metadataHash, agentId, paymentRef)`
 
 - Seller-only. Records a receipt for a sale that was paid outside this contract: another rail, another chain, an off-chain invoice.
+- Seller key only. A signer authorized with `setListingQuoteSigner` cannot attest, even though it can sign quotes that `purchaseSignedReceipt` accepts. This is deliberate, not a gap: a quote is a priced offer the seller can delegate, but an attestation is the seller's own claim about what it sold, so it is not delegable. A seller running quote signing through a bot must still call `attestReceipt` from the listing's seller address.
 - Moves no funds. No settlement token is transferred, no protocol or integrator fee is charged, and no `SellerPaid`, `ProtocolFeePaid`, or `IntegratorFeePaid` is emitted.
 - Emits `ReceiptAttested`, never `ReceiptPurchasedV2`. The two events have different names and therefore different `topic0` values on purpose: `ReceiptPurchasedV2` proves value moved through the contract, `ReceiptAttested` proves only that the listing's seller said so, and it carries no `amount` because the contract observed none.
 - Consumes `purchaseRef` in the shared `PurchaseRefRegistry`, exactly as the purchase paths do. A reference attested here can never be purchased afterwards, and a reference already purchased can never be attested, across every settlement contract sharing that registry.

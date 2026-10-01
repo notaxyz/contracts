@@ -939,6 +939,8 @@ contract NotaReceiptStore is EIP712, ReentrancyGuard, Ownable2Step {
         if (!listing.active) revert ListingInactive();
         _validatePurchaseRef(purchaseRef);
         if (metadataHash == bytes32(0)) revert InvalidParams();
+        // Not dead code: `consume` would revert on its own, but with the registry's error.
+        // Checking first surfaces `PurchaseRefAlreadyUsed`, matching the purchase paths.
         if (PURCHASE_REF_REGISTRY.isConsumed(purchaseRef)) {
             revert PurchaseRefAlreadyUsed();
         }
