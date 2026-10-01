@@ -7,7 +7,7 @@ Circle USDC on forked Base and Arbitrum One mainnet.
 |---|---|
 | Measured | 2026-10-01 (After); Before figures from 2026-08-27, not re-measured |
 | Before | `b62fa02` — receipt storage present, 50 bps launch fee, ECDSA-only signers |
-| After | `3b0ae27` — storage-free receipts, zero fee, ERC-1271 signers, `agentId`, `attestReceipt` |
+| After | `6d642ef` — storage-free receipts, zero fee, ERC-1271 signers, `agentId`, `attestReceipt` |
 | Harness | [`test/GasBenchmarkFork.t.sol`](../test/GasBenchmarkFork.t.sol) |
 
 ## Shipping configuration
