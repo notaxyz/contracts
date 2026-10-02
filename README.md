@@ -12,10 +12,11 @@ No escrow, no protocol fee on Base.
 | --- | --- | --- |
 | Base | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | v2, canonical, deployed August 2026 |
 | Arbitrum One | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | v1, June 2026 |
+| Arbitrum Sepolia (testnet) | `0x6b13e2077c84e1326111acBbb618E028723e2EA2` | v2 + `attestReceipt`, zero fee, October 2026 |
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
-A listing's seller can also record a sale that was paid outside the contract with `attestReceipt`. That path moves no funds and emits `ReceiptAttested`, a deliberately different event: it says the seller claims a sale happened, not that the chain saw a payment. It still consumes the `purchaseRef` in the shared `PurchaseRefRegistry`, so an attested reference can never also be purchased. `attestReceipt` is not part of the Base v2 deployment; see [Deployment](#deployment).
+A listing's seller can also record a sale that was paid outside the contract with `attestReceipt`. That path moves no funds and emits `ReceiptAttested`, a deliberately different event: it says the seller claims a sale happened, not that the chain saw a payment. It still consumes the `purchaseRef` in the shared `PurchaseRefRegistry`, so an attested reference can never also be purchased. `attestReceipt` is not part of the Base v2 deployment; it is live on the Arbitrum Sepolia testnet deployment. See [Deployment](#deployment).
 
 Nota is intentionally limited to Receipt Mode.
 
@@ -558,6 +559,7 @@ Constraints:
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless constants are adjusted in a future version
 - Base mainnet uses Circle's native USDC and an immutable zero protocol fee
 - the historical Arbitrum One v1 deployment uses Circle's native USDC and a 50 bps protocol fee
+- the Arbitrum Sepolia testnet deployment uses Circle's test USDC and a zero protocol fee, mirroring Base
 - `settlementToken` should be a standard ERC-20 such as USDC
 - fee-on-transfer and rebasing tokens are not supported
 
@@ -679,11 +681,11 @@ Required envs:
 - `RPC_URL`
 - `PRIVATE_KEY`
 - `SETTLEMENT_TOKEN`
-- `PROTOCOL_FEE_BPS` — must equal the script's expected fee for the current chain (`0` on Base)
+- `PROTOCOL_FEE_BPS` — must equal the script's expected fee for the current chain (`0` on Base and Arbitrum Sepolia)
 
 Optional envs:
 
-- `FEE_RECIPIENT` — leave unset on Base. Required only when deploying a fee-charging chain.
+- `FEE_RECIPIENT` — leave unset on Base and Arbitrum Sepolia. Required only when deploying a fee-charging chain.
 - `PROTOCOL_OWNER` — override the default owner. If unset (or equal to the deployer), the
   deployer is set as the immediate owner of both contracts in their constructors and the
   script skips `transferOwnership`, so there is no `Ownable2Step` pending-owner window. If
