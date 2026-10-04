@@ -8,11 +8,11 @@ No escrow, no protocol fee on Base.
 
 *Formerly zkReveal.*
 
-| Network | Contract | Status |
-| --- | --- | --- |
-| Base | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | v2, canonical, deployed August 2026 |
-| Arbitrum One | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | v1, June 2026 |
-| Arbitrum Sepolia (testnet) | `0x6b13e2077c84e1326111acBbb618E028723e2EA2` | v2 + `attestReceipt`, zero fee, October 2026 |
+| Network | Receipt store | PurchaseRefRegistry | Status |
+| --- | --- | --- | --- |
+| Base | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | `0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991` | v2, canonical, deployed August 2026 |
+| Arbitrum One | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | `0x6c55B0211cCF687F1505f03a7436302e59564446` | v1, June 2026 |
+| Arbitrum Sepolia (testnet) | `0x6b13e2077c84e1326111acBbb618E028723e2EA2` | `0x32aAeC7768adBBFD65C776b129616b8727d0c8bd` | v2 + `attestReceipt`, zero fee, October 2026 |
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
