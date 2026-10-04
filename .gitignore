@@ -16,6 +16,8 @@ build/
 dist/
 coverage/
 lcov.info
+package/src/abis.generated.ts
+package/src/deployments.generated.ts
 
 # Node
 node_modules/
