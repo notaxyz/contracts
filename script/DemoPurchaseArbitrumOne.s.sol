@@ -36,6 +36,23 @@ import {PurchaseRefRegistry} from "../src/PurchaseRefRegistry.sol";
 /// the deployed bytecode and are never sent: a reverting transaction would only burn gas, and the
 /// simulation already proves the deployed contract returns the expected custom error.
 ///
+/// Inspect the confirmed Arbitrum One transaction and its ReceiptPurchasedV2 log (receipt #1):
+///   cast receipt 0xfd547ef4bacfb2f30cd40c57a14c97a47ab1ae67d0290f1122e795c8155eb986 \
+///     --rpc-url "$ARBITRUM_RPC_URL"
+///
+/// Independently reproduce the committed metadata hash (jq emits one canonical line):
+///   cast keccak "$(jq -cS . script/demo-metadata-arbitrum-one.json)"
+///   # 0x45d2b52ac1b5fc6411bc5b16aa3095f9c17df72ddf526258867bb8156e0d3798
+///
+/// Confirm that the purchase reference was consumed in the v2 registry:
+///   cast call 0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991 "isConsumed(bytes32)(bool)" \
+///     0x52d4d87226d848fb769289727d882f865cc4c3e3413a8c4fd10e2b2bf2279d9f \
+///     --rpc-url "$ARBITRUM_RPC_URL"
+///
+/// Important: this script rewrites `script/demo-metadata-arbitrum-one.json` on every run, including
+/// dry runs. The committed copy corresponds to receipt #1 on Arbitrum One, purchased in
+/// transaction 0xfd547ef4bacfb2f30cd40c57a14c97a47ab1ae67d0290f1122e795c8155eb986.
+///
 /// @dev Writes the JCS-canonical metadata preimage to `script/demo-metadata-arbitrum-one.json`,
 ///      never to `script/demo-metadata.json`, whose committed copy matches Base receipt #1.
 ///      After a successful broadcast, commit that file so a public reader can reproduce the
