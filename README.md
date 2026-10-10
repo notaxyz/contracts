@@ -11,13 +11,13 @@ No escrow, no protocol fee on Base.
 | Network | Receipt store | PurchaseRefRegistry | Status |
 | --- | --- | --- | --- |
 | Base | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | `0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991` | v2, canonical, deployed August 2026 |
-| Arbitrum One | _pending broadcast_ | _pending broadcast_ | v2 + `attestReceipt`, zero fee, not yet deployed |
+| Arbitrum One | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | `0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991` | v2 + `attestReceipt`, zero fee, October 2026 (same addresses as Base, different code) |
 | Arbitrum One (legacy) | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | `0x6c55B0211cCF687F1505f03a7436302e59564446` | v1, June 2026, 50 bps; superseded by Arbitrum One v2 |
 | Arbitrum Sepolia (testnet) | `0x6b13e2077c84e1326111acBbb618E028723e2EA2` | `0x32aAeC7768adBBFD65C776b129616b8727d0c8bd` | v2 + `attestReceipt`, zero fee, October 2026 |
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
 
-A listing's seller can also record a sale that was paid outside the contract with `attestReceipt`. That path moves no funds and emits `ReceiptAttested`, a deliberately different event: it says the seller claims a sale happened, not that the chain saw a payment. It still consumes the `purchaseRef` in the shared `PurchaseRefRegistry`, so an attested reference can never also be purchased. `attestReceipt` is not part of the Base v2 deployment; it is live on the Arbitrum Sepolia testnet deployment. See [Deployment](#deployment).
+A listing's seller can also record a sale that was paid outside the contract with `attestReceipt`. That path moves no funds and emits `ReceiptAttested`, a deliberately different event: it says the seller claims a sale happened, not that the chain saw a payment. It still consumes the `purchaseRef` in the shared `PurchaseRefRegistry`, so an attested reference can never also be purchased. `attestReceipt` is not part of the Base v2 deployment; it is live on the Arbitrum One v2 and Arbitrum Sepolia testnet deployments. See [Deployment](#deployment).
 
 Nota is intentionally limited to Receipt Mode.
 
@@ -732,12 +732,17 @@ contract named `RevealReceiptStore` in verified source and manifests, with a 50 
 It remains live for historical integrations, but it is superseded by the Arbitrum One v2
 deployment, and Base is the canonical v2 deployment path.
 
-The Arbitrum One v2 deployment, recorded in `deployments/arbitrum-one.json` once broadcast, is
-built from this source, with `attestReceipt` and `ReceiptAttested`. It is not the same code as
+The Arbitrum One v2 deployment in `deployments/arbitrum-one.json` is built from this source, with `attestReceipt` and `ReceiptAttested`. It is not the same code as
 Base v2. It uses the Base shipping configuration: zero protocol fee and no fee recipient, enforced
 by the deploy script. It uses its own fresh `PurchaseRefRegistry` and does not share replay
 protection with the v1 registry `0x6c55B0211cCF687F1505f03a7436302e59564446`, which is neither
-reused nor re-authorized.
+reused nor re-authorized. Its addresses are identical to Base v2 because the same deployer used
+the same nonces, but the bytecode is not: check the chain, not only the address, before assuming
+`attestReceipt` exists.
+
+- `NotaReceiptStore`: `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88`
+- `PurchaseRefRegistry`: `0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991`
+- Settlement token: Circle native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`
 
 The Base v2 contract was deployed from commit `bb6935e`, before `attestReceipt` and
 `ReceiptAttested` existed. It does not carry them, and cannot: the contract is not upgradeable.
