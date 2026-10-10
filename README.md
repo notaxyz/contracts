@@ -11,7 +11,8 @@ No escrow, no protocol fee on Base.
 | Network | Receipt store | PurchaseRefRegistry | Status |
 | --- | --- | --- | --- |
 | Base | `0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88` | `0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991` | v2, canonical, deployed August 2026 |
-| Arbitrum One | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | `0x6c55B0211cCF687F1505f03a7436302e59564446` | v1, June 2026 |
+| Arbitrum One | _pending broadcast_ | _pending broadcast_ | v2 + `attestReceipt`, zero fee, not yet deployed |
+| Arbitrum One (legacy) | `0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0` | `0x6c55B0211cCF687F1505f03a7436302e59564446` | v1, June 2026, 50 bps; superseded by Arbitrum One v2 |
 | Arbitrum Sepolia (testnet) | `0x6b13e2077c84e1326111acBbb618E028723e2EA2` | `0x32aAeC7768adBBFD65C776b129616b8727d0c8bd` | v2 + `attestReceipt`, zero fee, October 2026 |
 
 Receipt Mode lets sellers create fixed-price listings or accept seller-authorized dynamic quotes. The contract settles funds immediately, emits `ReceiptPurchasedV2`, and records the seller net payment with `SellerPaid` so seller bots, APIs, dashboards, or indexers can fulfill orders off-chain.
@@ -559,7 +560,8 @@ Constraints:
 - large purchases are controlled by seller quote policy, frontend/backend limits, token allowance and balance, and operational risk controls
 - deploying with an 18-decimal token changes the practical meaning of the minimum purchase amount and is not recommended unless constants are adjusted in a future version
 - Base mainnet uses Circle's native USDC and an immutable zero protocol fee
-- the historical Arbitrum One v1 deployment uses Circle's native USDC and a 50 bps protocol fee
+- the Arbitrum One v2 deployment uses Circle's native USDC and an immutable zero protocol fee, like Base
+- the legacy Arbitrum One v1 deployment uses Circle's native USDC and a 50 bps protocol fee
 - the Arbitrum Sepolia testnet deployment uses Circle's test USDC and a zero protocol fee, mirroring Base
 - `settlementToken` should be a standard ERC-20 such as USDC
 - fee-on-transfer and rebasing tokens are not supported
@@ -675,18 +677,19 @@ The deploy script enforces `IERC20Metadata(SETTLEMENT_TOKEN).decimals() == 6`.
 On Base mainnet (`chainid 8453`) it additionally pins `SETTLEMENT_TOKEN` to Circle's
 native USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, requires
 `PROTOCOL_FEE_BPS=0`, and requires `FEE_RECIPIENT` to be unset or the zero address.
-Bridged USDbC is rejected.
+Bridged USDbC is rejected. On Arbitrum One (`chainid 42161`) it applies the same rules with
+Circle's native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`; bridged USDC.e is rejected.
 
 Required envs:
 
 - `RPC_URL`
 - `PRIVATE_KEY`
 - `SETTLEMENT_TOKEN`
-- `PROTOCOL_FEE_BPS` — must equal the script's expected fee for the current chain (`0` on Base and Arbitrum Sepolia)
+- `PROTOCOL_FEE_BPS` — must equal the script's expected fee for the current chain (`0` on Base, Arbitrum One, and Arbitrum Sepolia)
 
 Optional envs:
 
-- `FEE_RECIPIENT` — leave unset on Base and Arbitrum Sepolia. Required only when deploying a fee-charging chain.
+- `FEE_RECIPIENT` — leave unset on Base, Arbitrum One, and Arbitrum Sepolia. Required only when deploying a fee-charging chain.
 - `PROTOCOL_OWNER` — override the default owner. If unset (or equal to the deployer), the
   deployer is set as the immediate owner of both contracts in their constructors and the
   script skips `transferOwnership`, so there is no `Ownable2Step` pending-owner window. If
@@ -694,8 +697,8 @@ Optional envs:
   target must call `acceptOwnership()` in a separate transaction before it actually owns
   the registry.
 
-`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`. On Base it must stay
-unset or zero so the deployed contract has no fee destination at all. On fee-charging chains, the
+`FEE_RECIPIENT` may be the zero address only when `PROTOCOL_FEE_BPS=0`. On Base and Arbitrum One it must
+stay unset or zero so the deployed contract has no fee destination at all. On fee-charging chains, the
 fee recipient is immutable post-deploy — verify the address can receive USDC before broadcasting.
 
 The deploy output logs both:
@@ -724,9 +727,17 @@ export PROTOCOL_FEE_BPS="0"
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --broadcast --verify
 ```
 
-The Arbitrum One deployment in `deployments/arbitrum-one.json` is the June 2026 v1 contract
-named `RevealReceiptStore` in verified source and manifests. It remains live for historical
-integrations, but Base is the canonical v2 deployment path.
+The legacy Arbitrum One deployment in `deployments/arbitrum-one-v1.json` is the June 2026 v1
+contract named `RevealReceiptStore` in verified source and manifests, with a 50 bps protocol fee.
+It remains live for historical integrations, but it is superseded by the Arbitrum One v2
+deployment, and Base is the canonical v2 deployment path.
+
+The Arbitrum One v2 deployment, recorded in `deployments/arbitrum-one.json` once broadcast, is
+built from this source, with `attestReceipt` and `ReceiptAttested`. It is not the same code as
+Base v2. It uses the Base shipping configuration: zero protocol fee and no fee recipient, enforced
+by the deploy script. It uses its own fresh `PurchaseRefRegistry` and does not share replay
+protection with the v1 registry `0x6c55B0211cCF687F1505f03a7436302e59564446`, which is neither
+reused nor re-authorized.
 
 The Base v2 contract was deployed from commit `bb6935e`, before `attestReceipt` and
 `ReceiptAttested` existed. It does not carry them, and cannot: the contract is not upgradeable.
