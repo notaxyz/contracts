@@ -17,7 +17,7 @@
     "deployBlock": 513536708,
     "owner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
     "pendingOwner": "0x0000000000000000000000000000000000000000",
-    "arbiscanVerified": false
+    "arbiscanVerified": true
   },
   "notaReceiptStore": {
     "address": "0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88",
@@ -25,7 +25,7 @@
     "deployBlock": 513536720,
     "owner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
     "authorizedInPurchaseRefRegistry": true,
-    "arbiscanVerified": false
+    "arbiscanVerified": true
   },
   "registryAuthorization": {
     "txHash": "0x012983a98c5de56d9c2b9538da61ee17c74c5cdd61b722cd1cc2707c1787bfc0",
