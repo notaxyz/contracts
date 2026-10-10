@@ -9,8 +9,8 @@ import {NotaReceiptStore} from "../src/NotaReceiptStore.sol";
 
 contract Deploy is Script {
     uint256 internal constant MAX_PROTOCOL_FEE_BPS = 50;
-    /// @dev Launch fee for every chain except Base mainnet and Arbitrum Sepolia, which are
-    ///      pinned to zero below.
+    /// @dev Launch fee for every chain except Base mainnet, Arbitrum One, and Arbitrum Sepolia,
+    ///      which are pinned to zero below.
     ///      Update this constant deliberately when the launch fee changes.
     uint256 internal constant EXPECTED_PROTOCOL_FEE_BPS = 50;
     /// @dev Base mainnet launches with a zero protocol fee, immutable in the constructor: the
@@ -23,6 +23,9 @@ contract Deploy is Script {
     /// @dev Arbitrum Sepolia mirrors the zero-fee shipping configuration, so the testnet
     ///      exercises the same contract surface integrators see on Base mainnet.
     uint256 internal constant ARBITRUM_SEPOLIA_EXPECTED_PROTOCOL_FEE_BPS = 0;
+    /// @dev Arbitrum One v2 ships the same zero-fee configuration as Base mainnet. The June 2026
+    ///      v1 contracts on Arbitrum One charged 50 bps; they stay deployed and are not affected.
+    uint256 internal constant ARBITRUM_ONE_EXPECTED_PROTOCOL_FEE_BPS = 0;
     /// @dev Receipt settlement assumes a 6-decimal token such as USDC.
     uint8 internal constant EXPECTED_SETTLEMENT_TOKEN_DECIMALS = 6;
     /// @dev Arbitrum One mainnet chain id.
@@ -80,6 +83,8 @@ contract Deploy is Script {
             // Leave no fee destination on-chain, so "zero fee, cannot be turned on" is a property
             // an integrator can read off the deployed contract rather than a promise.
             require(feeRecipient == address(0), "Base mainnet: FEE_RECIPIENT must be zero at zero fee");
+        } else if (block.chainid == ARBITRUM_ONE_CHAIN_ID) {
+            require(feeRecipient == address(0), "Arbitrum One: FEE_RECIPIENT must be zero at zero fee");
         } else if (block.chainid == ARBITRUM_SEPOLIA_CHAIN_ID) {
             require(feeRecipient == address(0), "Arbitrum Sepolia: FEE_RECIPIENT must be zero at zero fee");
         }
@@ -119,11 +124,14 @@ contract Deploy is Script {
         console2.log("ReceiptStoreOwner:", receiptStore.owner());
     }
 
-    /// @dev Expected protocol fee for the chain being deployed to. Base mainnet and Arbitrum
-    ///      Sepolia are pinned to zero; every other chain uses the standard launch fee.
+    /// @dev Expected protocol fee for the chain being deployed to. Base mainnet, Arbitrum One,
+    ///      and Arbitrum Sepolia are pinned to zero; every other chain uses the standard launch fee.
     function _expectedProtocolFeeBps() internal view returns (uint256) {
         if (block.chainid == BASE_MAINNET_CHAIN_ID) {
             return BASE_MAINNET_EXPECTED_PROTOCOL_FEE_BPS;
+        }
+        if (block.chainid == ARBITRUM_ONE_CHAIN_ID) {
+            return ARBITRUM_ONE_EXPECTED_PROTOCOL_FEE_BPS;
         }
         if (block.chainid == ARBITRUM_SEPOLIA_CHAIN_ID) {
             return ARBITRUM_SEPOLIA_EXPECTED_PROTOCOL_FEE_BPS;

@@ -31,16 +31,18 @@ contract DeployHarness is Deploy {
     }
 }
 
-/// @dev Covers the chain-conditional guards in the deploy script. The Base mainnet cases are the
-///      load-bearing ones: the zero protocol fee is a positioning commitment that integrators are
-///      supposed to be able to verify on-chain, so the script must refuse to deploy Base with a
-///      fee configured, or with a fee destination that would make the commitment ambiguous.
+/// @dev Covers the chain-conditional guards in the deploy script. The Base mainnet and Arbitrum One
+///      cases are the load-bearing ones: the zero protocol fee is a positioning commitment that
+///      integrators are supposed to be able to verify on-chain, so the script must refuse to deploy
+///      either chain with a fee configured, or with a fee destination that would make the
+///      commitment ambiguous.
 contract DeployTest is Test {
     uint256 internal constant BASE_MAINNET_CHAIN_ID = 8453;
     address internal constant BASE_MAINNET_NATIVE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant BASE_USDBC_BRIDGED = 0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA;
     uint256 internal constant ARBITRUM_ONE_CHAIN_ID = 42161;
     address internal constant ARBITRUM_ONE_NATIVE_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
+    address internal constant ARBITRUM_ONE_USDCE_BRIDGED = 0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8;
     uint256 internal constant ARBITRUM_SEPOLIA_CHAIN_ID = 421614;
     uint256 internal constant ETHEREUM_SEPOLIA_CHAIN_ID = 11155111;
 
@@ -60,6 +62,7 @@ contract DeployTest is Test {
         vm.etch(BASE_MAINNET_NATIVE_USDC, usdcCode);
         vm.etch(BASE_USDBC_BRIDGED, usdcCode);
         vm.etch(ARBITRUM_ONE_NATIVE_USDC, usdcCode);
+        vm.etch(ARBITRUM_ONE_USDCE_BRIDGED, usdcCode);
 
         vm.deal(deployer, 10 ether);
     }
@@ -113,22 +116,40 @@ contract DeployTest is Test {
         deployScript.run();
     }
 
-    /// @dev The Base carve-out must not change what other chains expect.
-    function test_ArbitrumOne_StillExpectsLaunchFee() public {
-        vm.chainId(ARBITRUM_ONE_CHAIN_ID);
-        _configure(ARBITRUM_ONE_NATIVE_USDC, 50, address(0xFEE));
-
-        (, NotaReceiptStore receiptStore) = deployScript.run();
-
-        assertEq(receiptStore.PROTOCOL_FEE_BPS(), 50);
-        assertEq(receiptStore.FEE_RECIPIENT(), address(0xFEE));
-    }
-
-    function test_ArbitrumOne_RejectsZeroProtocolFee() public {
+    /// @dev Arbitrum One v2 ships the Base configuration: zero fee, no fee recipient, native USDC.
+    function test_ArbitrumOne_DeploysWithZeroFeeAndNoFeeRecipient() public {
         vm.chainId(ARBITRUM_ONE_CHAIN_ID);
         _configure(ARBITRUM_ONE_NATIVE_USDC, 0, address(0));
 
+        (PurchaseRefRegistry registry, NotaReceiptStore receiptStore) = deployScript.run();
+
+        assertEq(receiptStore.PROTOCOL_FEE_BPS(), 0);
+        assertEq(receiptStore.FEE_RECIPIENT(), address(0));
+        assertEq(address(receiptStore.SETTLEMENT_TOKEN()), ARBITRUM_ONE_NATIVE_USDC);
+        assertTrue(registry.authorizedConsumers(address(receiptStore)));
+    }
+
+    function test_ArbitrumOne_RejectsNonZeroProtocolFee() public {
+        vm.chainId(ARBITRUM_ONE_CHAIN_ID);
+        _configure(ARBITRUM_ONE_NATIVE_USDC, 50, address(0xFEE));
+
         vm.expectRevert(bytes(FEE_MISMATCH_ERROR));
+        deployScript.run();
+    }
+
+    function test_ArbitrumOne_RejectsFeeRecipientAtZeroFee() public {
+        vm.chainId(ARBITRUM_ONE_CHAIN_ID);
+        _configure(ARBITRUM_ONE_NATIVE_USDC, 0, address(0xFEE));
+
+        vm.expectRevert("Arbitrum One: FEE_RECIPIENT must be zero at zero fee");
+        deployScript.run();
+    }
+
+    function test_ArbitrumOne_RejectsBridgedUSDCe() public {
+        vm.chainId(ARBITRUM_ONE_CHAIN_ID);
+        _configure(ARBITRUM_ONE_USDCE_BRIDGED, 0, address(0));
+
+        vm.expectRevert("Arbitrum One: SETTLEMENT_TOKEN must be canonical native USDC");
         deployScript.run();
     }
 

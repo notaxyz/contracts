@@ -1,33 +1,34 @@
 {
   "network": "arbitrum-one",
   "chainId": 42161,
-  "deployedAt": "2026-06-13T12:33:51Z",
-  "broadcastTimestampMs": 1781354031214,
-  "gitCommit": "ca31fa1",
-  "deployer": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
-  "protocolOwner": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
+  "deployedAt": "2026-10-10T14:18:06Z",
+  "broadcastTimestampMs": 1791641894560,
+  "gitCommit": "d6613b7",
+  "notes": "Arbitrum One v2 deployment of the attestReceipt build. Not the same code as Base v2 (bb6935e): this contract adds attestReceipt and ReceiptAttested. The addresses are identical to Base v2 because the same deployer deployed at the same nonces, but the bytecode differs; do not infer the Base contract surface from the address. Zero protocol fee and no fee recipient, mirroring the Base shipping configuration. Uses its own fresh PurchaseRefRegistry, separate from the v1 registry 0x6c55B0211cCF687F1505f03a7436302e59564446 in arbitrum-one-v1.json; it does not share replay protection with it, and the v1 registry was neither reused nor re-authorized. src/ is as at 84ac4f6 and unchanged at d6613b7.",
+  "deployer": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
+  "protocolOwner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
   "settlementToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
   "settlementTokenSymbol": "USDC",
-  "feeRecipient": "0x6DAB8178ad6a8a54A6F7A46af6126613f076a8dA",
-  "protocolFeeBps": 50,
+  "feeRecipient": "0x0000000000000000000000000000000000000000",
+  "protocolFeeBps": 0,
   "purchaseRefRegistry": {
-    "address": "0x6c55B0211cCF687F1505f03a7436302e59564446",
-    "deployTxHash": "0x0bace0644231509714ddc8bb15634fbc5294135008663402c2365230b93978ab",
-    "deployBlock": 473063929,
-    "owner": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
+    "address": "0x9AaFfA5787ca332a40B9C98E3e5323A97F96D991",
+    "deployTxHash": "0xbbe0c1a339d2ce38b93b6e12ef71de22c4ed1e04f545ebc20ab3a0bf8afb55a6",
+    "deployBlock": 513536708,
+    "owner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
     "pendingOwner": "0x0000000000000000000000000000000000000000",
     "arbiscanVerified": true
   },
-  "revealReceiptStore": {
-    "address": "0x2E545DA379e512de75C8Dd463f2B3E3A332c7ec0",
-    "deployTxHash": "0xa0335e8b510b2c6c565bf011c457405d13c34cd2c4dfeb578e7787c82e8a25ab",
-    "deployBlock": 473063947,
-    "owner": "0xC960368FC8F498a40fF53721dca1a26bF9A40F38",
+  "notaReceiptStore": {
+    "address": "0xf6062F3F52D3E19cb9cc3e027491a5c11D101F88",
+    "deployTxHash": "0x7a0060f025bea2796e3509bad23635c96bba1d771ed91f45b48cbcfee8d795de",
+    "deployBlock": 513536720,
+    "owner": "0xfc89558d446dD2Ca2DA9B4f36760dC13b3CB3617",
     "authorizedInPurchaseRefRegistry": true,
     "arbiscanVerified": true
   },
   "registryAuthorization": {
-    "txHash": "0x8ff6394842fe07392182acf0a1c10efd449fd8da5cae24c4eeb3a5d5cc50ae3b",
-    "block": 473063959
+    "txHash": "0x012983a98c5de56d9c2b9538da61ee17c74c5cdd61b722cd1cc2707c1787bfc0",
+    "block": 513536731
   }
 }
